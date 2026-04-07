@@ -2,8 +2,10 @@ package com.atuy.oos_lancher_customizer
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.LauncherApps
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.BlendMode
 import android.graphics.Canvas
 import android.graphics.Color
@@ -12,6 +14,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.Rect
+import android.graphics.Shader
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
@@ -20,6 +23,7 @@ import android.os.UserHandle
 import android.util.LruCache
 import android.view.View
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.drawable.toDrawable
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -81,7 +85,9 @@ class ThemedIcons : IXposedHookLoadPackage {
             if (!shouldApplyToBubble(view, pkg)) return
 
             val context = view.context.applicationContext ?: return
-            val themed = themedDrawable(context, pkg, drawable) ?: return
+            val isShortcut = isShortcutLikeItem(itemInfo)
+            val source = resolveBestSourceDrawable(context, itemInfo, drawable)
+            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
             themed.bounds = drawable.bounds
             param.args[0] = themed
 
@@ -102,7 +108,9 @@ class ThemedIcons : IXposedHookLoadPackage {
             }.getOrNull() ?: return
 
             val context = resolveContext(param.thisObject) ?: return
-            val themed = themedDrawable(context, pkg, drawable) ?: return
+            val isShortcut = isShortcutLikeItem(itemInfo)
+            val source = resolveBestSourceDrawable(context, itemInfo, drawable)
+            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
             themed.bounds = drawable.bounds
             XposedHelpers.setObjectField(previewParams, "drawable", themed)
 
@@ -173,10 +181,92 @@ class ThemedIcons : IXposedHookLoadPackage {
         return null
     }
 
-    private fun themedDrawable(context: Context, pkg: String, original: Drawable): Drawable? {
+    private fun resolveComponentName(itemInfo: Any): ComponentName? {
+        runCatching {
+            XposedHelpers.getObjectField(itemInfo, "componentName") as? ComponentName
+        }.getOrNull()?.let { return it }
+
+        runCatching {
+            XposedHelpers.callMethod(itemInfo, "getTargetComponent") as? ComponentName
+        }.getOrNull()?.let { return it }
+
+        runCatching {
+            XposedHelpers.callMethod(itemInfo, "getMTargetComponent") as? ComponentName
+        }.getOrNull()?.let { return it }
+
+        return null
+    }
+
+    private fun resolveUserHandle(itemInfo: Any): UserHandle? {
+        return runCatching {
+            XposedHelpers.getObjectField(itemInfo, "user") as? UserHandle
+        }.getOrNull()
+    }
+
+    private fun loadOriginalIcon(
+        context: Context,
+        component: ComponentName,
+        user: UserHandle
+    ): Drawable? {
+        return runCatching {
+            val launcherApps =
+                context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+            val activityInfo =
+                launcherApps.getActivityList(component.packageName, user).firstOrNull {
+                    it.componentName == component
+                }
+            if (activityInfo != null) return@runCatching activityInfo.getIcon(0)
+            context.packageManager.getActivityIcon(component)
+        }.getOrNull()
+    }
+
+    private fun resolveBestSourceDrawable(context: Context, itemInfo: Any, fallback: Drawable): Drawable {
+        val itemType = resolveItemType(itemInfo)
+        if (itemType != 0 || isShortcutLikeItem(itemInfo)) {
+            return fallback
+        }
+        val component = resolveComponentName(itemInfo) ?: return fallback
+        val user = resolveUserHandle(itemInfo) ?: android.os.Process.myUserHandle()
+        return loadOriginalIcon(context, component, user) ?: fallback
+    }
+
+    private fun resolveItemType(itemInfo: Any): Int? {
+        return runCatching {
+            XposedHelpers.getIntField(itemInfo, "itemType")
+        }.getOrNull()
+    }
+
+    private fun isShortcutLikeItem(itemInfo: Any): Boolean {
+        val itemType = resolveItemType(itemInfo)
+        if (itemType == 1 || itemType == 6) return true
+
+        val deepShortcut = runCatching {
+            XposedHelpers.callMethod(itemInfo, "getDeepShortcutId") as? String
+        }.getOrNull()
+        if (!deepShortcut.isNullOrEmpty()) return true
+
+        val shortcutId = runCatching {
+            XposedHelpers.getObjectField(itemInfo, "deepShortcutId") as? String
+        }.getOrNull()
+        return !shortcutId.isNullOrEmpty()
+    }
+
+    private fun circleMasked(bitmap: Bitmap): Bitmap {
+        val size = min(bitmap.width, bitmap.height)
+        val output = createBitmap(size, size)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        }
+        val r = size * 0.5f
+        canvas.drawCircle(r, r, r, paint)
+        return output
+    }
+
+    private fun themedDrawable(context: Context, pkg: String, original: Drawable, isShortcut: Boolean): Drawable? {
         val night = isNightMode(context)
         val sourceSig = buildSourceSignature(original)
-        val key = "$pkg|$night|$sourceSig"
+        val key = "$pkg|$night|$isShortcut|$sourceSig"
 
         if (failedKeys.get(key) == true) {
             return null
@@ -188,17 +278,17 @@ class ThemedIcons : IXposedHookLoadPackage {
             if (hits % LOG_EVERY_N_HITS == 0L) {
                 log("cache hit=$hits miss=${cacheMiss.get()} sizeKB=${iconCache.size()}")
             }
-            return BitmapDrawable(context.resources, cached)
+            return cached.toDrawable(context.resources)
         }
 
-        val bitmap = generateRawThemedBitmap(context, original)
+        val bitmap = generateRawThemedBitmap(context, original, isShortcut)
         if (bitmap == null) {
             failedKeys.put(key, true)
             return null
         }
         iconCache.put(key, bitmap)
         cacheMiss.incrementAndGet()
-        return BitmapDrawable(context.resources, bitmap)
+        return bitmap.toDrawable(context.resources)
     }
 
     private fun buildSourceSignature(source: Drawable): String {
@@ -253,7 +343,7 @@ class ThemedIcons : IXposedHookLoadPackage {
         }
     }
 
-    private fun generateRawThemedBitmap(context: Context, original: Drawable): Bitmap? {
+    private fun generateRawThemedBitmap(context: Context, original: Drawable, isShortcut: Boolean): Bitmap? {
         val isDarkMode = isNightMode(context)
         val bgColor = context.getColor(
             if (isDarkMode) android.R.color.system_neutral1_800 else android.R.color.system_accent1_100
@@ -274,14 +364,16 @@ class ThemedIcons : IXposedHookLoadPackage {
                 original.monochrome!!.mutate()
             } else {
                 val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
-                MonochromeIconFactory(original, size).create()
+                MonochromeIconFactory(original, size, context.resources).create()
             }
 
         val size = 192
         val bitmap = createBitmap(size, size)
         val canvas = Canvas(bitmap)
 
-        canvas.drawColor(bgColor)
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
+        val radius = size * 0.5f
+        canvas.drawCircle(size * 0.5f, size * 0.5f, radius, bgPaint)
 
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
@@ -290,12 +382,13 @@ class ThemedIcons : IXposedHookLoadPackage {
             min(monoDrawable.intrinsicWidth, monoDrawable.intrinsicHeight)
         } else size
 
-        val iconSize = when {
+        val baseIconSize = when {
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
             isAdaptive -> (size * 1.50f).toInt()
             else -> min(size, monoIntrinsic)
         }
+        val iconSize = if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
         val offset = (size - iconSize) / 2
 
         runCatching {
@@ -316,10 +409,14 @@ class ThemedIcons : IXposedHookLoadPackage {
             }
         }
 
-        return bitmap
+        return circleMasked(bitmap)
     }
 
-    private inner class MonochromeIconFactory(private val icon: Drawable, iconBitmapSize: Int) {
+    private inner class MonochromeIconFactory(
+        private val icon: Drawable,
+        iconBitmapSize: Int,
+        private val resources: android.content.res.Resources
+    ) {
         private val mBitmapSize: Int
         private val mEdgePixelLength: Int
         private val mFlatBitmap: Bitmap
@@ -358,7 +455,7 @@ class ThemedIcons : IXposedHookLoadPackage {
 
         fun create(): Drawable {
             convertMono()
-            return BitmapDrawable(null, mAlphaBitmap).apply {
+            return mAlphaBitmap.toDrawable(resources).apply {
                 setBounds(0, 0, mBitmapSize, mBitmapSize)
             }
         }
