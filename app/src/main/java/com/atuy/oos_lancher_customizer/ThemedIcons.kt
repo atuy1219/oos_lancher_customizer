@@ -24,20 +24,21 @@ import android.util.LruCache
 import android.view.View
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
-import de.robv.android.xposed.IXposedHookLoadPackage
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface
 import java.nio.ByteBuffer
+import java.lang.reflect.Field
+import java.lang.reflect.Method
+import java.util.LinkedHashSet
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-class ThemedIcons : IXposedHookLoadPackage {
+class ThemedIcons : XposedModule() {
 
     companion object {
-        private const val TAG = "OOS16_ThemedIcons"
         private const val TARGET_PACKAGE = "com.android.launcher"
         private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
         private const val PREVIEW_MANAGER_CLASS = "com.android.launcher3.folder.PreviewItemManager"
@@ -45,6 +46,7 @@ class ThemedIcons : IXposedHookLoadPackage {
         private const val LOG_EVERY_N_HITS = 30L
     }
 
+    private val hooksInstalled = AtomicBoolean(false)
     private val seq = AtomicLong(0)
     private val cacheHits = AtomicLong(0)
     private val cacheMiss = AtomicLong(0)
@@ -55,67 +57,94 @@ class ThemedIcons : IXposedHookLoadPackage {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
 
-    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        if (lpparam.packageName != TARGET_PACKAGE) return
+    override fun onPackageLoaded(param: XposedModuleInterface.PackageLoadedParam) {
+        if (param.packageName != TARGET_PACKAGE) return
+        if (hooksInstalled.get()) return
 
         runCatching {
-            val bubbleTextViewClass = XposedHelpers.findClass(BTV_CLASS, lpparam.classLoader)
-            XposedBridge.hookAllMethods(bubbleTextViewClass, "setIcon", SetIconHook())
-            log("hooked BubbleTextView#setIcon")
-
-            runCatching {
-                val previewManagerClass = XposedHelpers.findClass(PREVIEW_MANAGER_CLASS, lpparam.classLoader)
-                XposedBridge.hookAllMethods(previewManagerClass, "setDrawable", PreviewDrawableHook())
-                log("hooked PreviewItemManager#setDrawable")
-            }.onFailure {
-                log("PreviewItemManager hook skipped: ${it.message}")
-            }
+            installHooks(param.defaultClassLoader)
         }.onFailure {
-            log("critical: ${it.message}")
+            logError("critical: ${it.message}", it)
         }
     }
 
-    private inner class SetIconHook : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
-            val view = param.thisObject as? View ?: return
-            val drawable = param.args.firstOrNull() as? Drawable ?: return
-            val itemInfo = runCatching { view.tag }.getOrNull() ?: return
-            val pkg = resolvePackageName(itemInfo) ?: return
+    private fun installHooks(classLoader: ClassLoader) {
+        if (!hooksInstalled.compareAndSet(false, true)) return
 
-            if (!shouldApplyToBubble(view, pkg)) return
+        val bubbleTextViewClass = Class.forName(BTV_CLASS, false, classLoader)
+        hookAllMethods(bubbleTextViewClass, "setIcon", SetIconHook())
+        log("hooked BubbleTextView#setIcon")
 
-            val context = view.context.applicationContext ?: return
+        runCatching {
+            val previewManagerClass = Class.forName(PREVIEW_MANAGER_CLASS, false, classLoader)
+            hookAllMethods(previewManagerClass, "setDrawable", PreviewDrawableHook())
+            log("hooked PreviewItemManager#setDrawable")
+        }.onFailure {
+            log("PreviewItemManager hook skipped: ${it.message}")
+        }
+    }
+
+    private fun hookAllMethods(clazz: Class<*>, methodName: String, hooker: XposedInterface.Hooker) {
+        val methods = LinkedHashSet<Method>()
+        methods.addAll(clazz.declaredMethods.filter { it.name == methodName })
+        methods.addAll(clazz.methods.filter { it.name == methodName })
+
+        methods.forEach { method ->
+            runCatching {
+                method.isAccessible = true
+                hook(method)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(hooker)
+            }.onFailure {
+                log("hook failed ${clazz.simpleName}#${method.name}: ${it.message}")
+            }
+        }
+    }
+
+    private inner class SetIconHook : XposedInterface.Hooker {
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            val view = chain.thisObject as? View ?: return chain.proceed()
+            val args = chain.args.toMutableList()
+            val drawable = args.firstOrNull() as? Drawable ?: return chain.proceed()
+            val itemInfo = runCatching { view.tag }.getOrNull() ?: return chain.proceed()
+            val pkg = resolvePackageName(itemInfo) ?: return chain.proceed()
+
+            if (!shouldApplyToBubble(view, pkg)) return chain.proceed()
+
+            val context = view.context.applicationContext ?: return chain.proceed()
             val isShortcut = isShortcutLikeItem(itemInfo)
             val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return chain.proceed()
             themed.bounds = drawable.bounds
-            param.args[0] = themed
+            args[0] = themed
 
             val id = seq.incrementAndGet()
             log("[$id] setIcon themed pkg=$pkg view=${view.javaClass.simpleName} display=${safeDisplay(view)}")
+            return chain.proceed(args.toTypedArray())
         }
     }
 
-    private inner class PreviewDrawableHook : XC_MethodHook() {
-        override fun afterHookedMethod(param: MethodHookParam) {
-            val previewParams = param.args.firstOrNull() ?: return
-            val itemInfo = param.args.getOrNull(1) ?: return
-            val pkg = resolvePackageName(itemInfo) ?: return
-            if (!shouldApplyToPackage(pkg)) return
+    private inner class PreviewDrawableHook : XposedInterface.Hooker {
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            val result = chain.proceed()
 
-            val drawable = runCatching {
-                XposedHelpers.getObjectField(previewParams, "drawable") as? Drawable
-            }.getOrNull() ?: return
+            val previewParams = chain.args.firstOrNull() ?: return result
+            val itemInfo = chain.args.getOrNull(1) ?: return result
+            val pkg = resolvePackageName(itemInfo) ?: return result
+            if (!shouldApplyToPackage(pkg)) return result
 
-            val context = resolveContext(param.thisObject) ?: return
+            val drawable = getObjectField(previewParams, "drawable") as? Drawable ?: return result
+
+            val context = resolveContext(chain.thisObject) ?: return result
             val isShortcut = isShortcutLikeItem(itemInfo)
             val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+            val themed = themedDrawable(context, pkg, source, isShortcut) ?: return result
             themed.bounds = drawable.bounds
-            XposedHelpers.setObjectField(previewParams, "drawable", themed)
+            setObjectField(previewParams, "drawable", themed)
 
             val id = seq.incrementAndGet()
             log("[$id] preview themed pkg=$pkg drawable=${drawable.javaClass.simpleName}")
+            return result
         }
     }
 
@@ -136,7 +165,7 @@ class ThemedIcons : IXposedHookLoadPackage {
     }
 
     private fun safeDisplay(view: View): Int? {
-        return runCatching { XposedHelpers.getIntField(view, "mDisplay") }.getOrNull()
+        return runCatching { getIntField(view, "mDisplay") }.getOrNull()
     }
 
     private fun resolveContext(owner: Any?): Context? {
@@ -158,49 +187,31 @@ class ThemedIcons : IXposedHookLoadPackage {
     }
 
     private fun resolvePackageName(itemInfo: Any): String? {
-        runCatching {
-            XposedHelpers.getObjectField(itemInfo, "componentName") as? ComponentName
-        }.getOrNull()?.packageName?.let { return it }
+        (getObjectField(itemInfo, "componentName") as? ComponentName)?.packageName?.let { return it }
 
-        runCatching {
-            XposedHelpers.callMethod(itemInfo, "getTargetComponent") as? ComponentName
-        }.getOrNull()?.packageName?.let { return it }
+        (callNoArgMethod(itemInfo, "getTargetComponent") as? ComponentName)?.packageName?.let { return it }
 
-        runCatching {
-            XposedHelpers.callMethod(itemInfo, "getMTargetComponent") as? ComponentName
-        }.getOrNull()?.packageName?.let { return it }
+        (callNoArgMethod(itemInfo, "getMTargetComponent") as? ComponentName)?.packageName?.let { return it }
 
-        runCatching {
-            XposedHelpers.getObjectField(itemInfo, "packageName") as? String
-        }.getOrNull()?.takeIf { it.contains('.') }?.let { return it }
+        (getObjectField(itemInfo, "packageName") as? String)?.takeIf { it.contains('.') }?.let { return it }
 
-        runCatching {
-            XposedHelpers.callMethod(itemInfo, "getTargetPackage") as? String
-        }.getOrNull()?.takeIf { it.contains('.') }?.let { return it }
+        (callNoArgMethod(itemInfo, "getTargetPackage") as? String)?.takeIf { it.contains('.') }?.let { return it }
 
         return null
     }
 
     private fun resolveComponentName(itemInfo: Any): ComponentName? {
-        runCatching {
-            XposedHelpers.getObjectField(itemInfo, "componentName") as? ComponentName
-        }.getOrNull()?.let { return it }
+        (getObjectField(itemInfo, "componentName") as? ComponentName)?.let { return it }
 
-        runCatching {
-            XposedHelpers.callMethod(itemInfo, "getTargetComponent") as? ComponentName
-        }.getOrNull()?.let { return it }
+        (callNoArgMethod(itemInfo, "getTargetComponent") as? ComponentName)?.let { return it }
 
-        runCatching {
-            XposedHelpers.callMethod(itemInfo, "getMTargetComponent") as? ComponentName
-        }.getOrNull()?.let { return it }
+        (callNoArgMethod(itemInfo, "getMTargetComponent") as? ComponentName)?.let { return it }
 
         return null
     }
 
     private fun resolveUserHandle(itemInfo: Any): UserHandle? {
-        return runCatching {
-            XposedHelpers.getObjectField(itemInfo, "user") as? UserHandle
-        }.getOrNull()
+        return getObjectField(itemInfo, "user") as? UserHandle
     }
 
     private fun loadOriginalIcon(
@@ -231,9 +242,7 @@ class ThemedIcons : IXposedHookLoadPackage {
     }
 
     private fun resolveItemType(itemInfo: Any): Int? {
-        return runCatching {
-            XposedHelpers.getIntField(itemInfo, "itemType")
-        }.getOrNull()
+        return runCatching { getIntField(itemInfo, "itemType") }.getOrNull()
     }
 
     private fun isShortcutLikeItem(itemInfo: Any): Boolean {
@@ -241,14 +250,59 @@ class ThemedIcons : IXposedHookLoadPackage {
         if (itemType == 1 || itemType == 6) return true
 
         val deepShortcut = runCatching {
-            XposedHelpers.callMethod(itemInfo, "getDeepShortcutId") as? String
+            callNoArgMethod(itemInfo, "getDeepShortcutId") as? String
         }.getOrNull()
         if (!deepShortcut.isNullOrEmpty()) return true
 
-        val shortcutId = runCatching {
-            XposedHelpers.getObjectField(itemInfo, "deepShortcutId") as? String
-        }.getOrNull()
+        val shortcutId = getObjectField(itemInfo, "deepShortcutId") as? String
         return !shortcutId.isNullOrEmpty()
+    }
+
+    private fun findField(owner: Class<*>, name: String): Field? {
+        var cls: Class<*>? = owner
+        while (cls != null) {
+            runCatching { cls.getDeclaredField(name) }.getOrNull()?.let { return it }
+            cls = cls.superclass
+        }
+        return null
+    }
+
+    private fun getObjectField(target: Any, name: String): Any? {
+        val field = findField(target.javaClass, name) ?: return null
+        return runCatching {
+            field.isAccessible = true
+            field.get(target)
+        }.getOrNull()
+    }
+
+    private fun setObjectField(target: Any, name: String, value: Any?) {
+        val field = findField(target.javaClass, name) ?: return
+        runCatching {
+            field.isAccessible = true
+            field.set(target, value)
+        }
+    }
+
+    private fun getIntField(target: Any, name: String): Int {
+        val field = findField(target.javaClass, name)
+            ?: throw NoSuchFieldException("Field not found: $name")
+        field.isAccessible = true
+        return field.getInt(target)
+    }
+
+    private fun callNoArgMethod(target: Any, name: String): Any? {
+        var cls: Class<*>? = target.javaClass
+        while (cls != null) {
+            val method = cls.declaredMethods.firstOrNull { it.name == name && it.parameterCount == 0 }
+            if (method != null) {
+                return runCatching {
+                    method.isAccessible = true
+                    method.invoke(target)
+                }.getOrNull()
+            }
+            cls = cls.superclass
+        }
+        return null
     }
 
     private fun circleMasked(bitmap: Bitmap): Bitmap {
@@ -302,7 +356,11 @@ class ThemedIcons : IXposedHookLoadPackage {
     }
 
     private fun log(msg: String) {
-        XposedBridge.log("$TAG: $msg")
+        L.d(msg)
+    }
+
+    private fun logError(msg: String, throwable: Throwable? = null) {
+        L.e(msg, throwable)
     }
 
     private fun toSoftwareBitmap(bitmap: Bitmap?): Bitmap? {

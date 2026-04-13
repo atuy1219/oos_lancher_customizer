@@ -19,3 +19,11 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Remove non-critical android.util.Log calls when minify is enabled.
+-assumenosideeffects class android.util.Log {
+	public static int v(...);
+	public static int d(...);
+	public static int i(...);
+	public static int w(...);
+}

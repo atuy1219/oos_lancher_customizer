@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">oos_lancher_customizer</string>
+    <string name="module_description">OOSのランチャーの旧テーマアイコンを強制する</string>
 </resources>

@@ -6,6 +6,10 @@ android {
     namespace = "com.atuy.oos_lancher_customizer"
     compileSdk = 36
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.atuy.oos_lancher_customizer"
         minSdk = 34
@@ -36,5 +40,5 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
-    compileOnly(libs.api)
+    compileOnly(libs.libxposed.api)
 }
