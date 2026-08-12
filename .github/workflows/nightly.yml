@@ -1,0 +1,64 @@
+name: Nightly
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 37
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-37" "build-tools;37.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build installable Nightly APK
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon clean assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk oos-launcher-customizer-nightly.apk
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oos-launcher-customizer-nightly
+          path: oos-launcher-customizer-nightly.apk
+          if-no-files-found: error
+
+      - name: Publish Nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            oos-launcher-customizer-nightly.apk \
+            --target "$GITHUB_SHA" \
+            --title "Nightly" \
+            --prerelease \
+            --notes "Automated Nightly build from commit $GITHUB_SHA. This APK is debug-signed so it can be installed directly."
