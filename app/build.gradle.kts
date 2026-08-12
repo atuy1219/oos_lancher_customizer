@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.atuy.oos_lancher_customizer"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.atuy.oos_lancher_customizer"
