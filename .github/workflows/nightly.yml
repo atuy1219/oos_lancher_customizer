@@ -29,11 +29,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
 
-      - name: Install Android SDK 36
+      - name: Install Android 17 preview SDK
         shell: bash
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager --channel=3 "platforms;android-37" "build-tools;37.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
