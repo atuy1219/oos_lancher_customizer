@@ -1,16 +1,15 @@
 [versions]
-agp = "9.1.0"
-api = "82"
-coreKtx = "1.18.0"
+agp = "9.3.0"
+xposedApi = "102.0.0"
+coreKtx = "1.19.0"
 appcompat = "1.7.1"
-material = "1.13.0"
+material = "1.14.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
-api = { module = "de.robv.android.xposed:api", version.ref = "api" }
+libxposed-api = { module = "io.github.libxposed:api", version.ref = "xposedApi" }
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
-
