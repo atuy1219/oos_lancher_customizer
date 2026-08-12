@@ -32,10 +32,54 @@ jobs:
         with:
           packages: platform-tools
 
-      - name: Install Android 17 preview SDK
+      - name: Install Android 17 SDK
         shell: bash
         run: |
-          sdkmanager --channel=3 "platforms;android-37" "build-tools;37.0.0"
+          sdkmanager --list --channel=3 > /tmp/sdk-packages.txt
+          echo "Android 17 SDK candidates:"
+          grep -Ei 'cinnamon|platforms;android-37|build-tools;37' /tmp/sdk-packages.txt || true
+
+          PLATFORM_PACKAGE="$(awk -F'|' '
+            BEGIN { IGNORECASE=1 }
+            {
+              path=$1; desc=$3
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", path)
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", desc)
+              if (path ~ /^platforms;/ && (path ~ /cinnamon|android-37/ || desc ~ /cinnamon|platform 37/)) {
+                print path
+                exit
+              }
+            }
+          ' /tmp/sdk-packages.txt)"
+
+          BUILD_TOOLS_PACKAGE="$(awk -F'|' '
+            {
+              path=$1
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", path)
+              if (path ~ /^build-tools;37/) print path
+            }
+          ' /tmp/sdk-packages.txt | sort -V | tail -n1)"
+
+          if [[ -z "$PLATFORM_PACKAGE" ]]; then
+            echo "Could not find Android 17/Cinnamon Bun platform package. Available platforms:" >&2
+            grep -E '^[[:space:]]*platforms;' /tmp/sdk-packages.txt | tail -n 30 >&2 || true
+            exit 1
+          fi
+          if [[ -z "$BUILD_TOOLS_PACKAGE" ]]; then
+            echo "Could not find Build Tools 37 package." >&2
+            exit 1
+          fi
+
+          echo "Installing $PLATFORM_PACKAGE and $BUILD_TOOLS_PACKAGE"
+          sdkmanager --channel=3 "$PLATFORM_PACKAGE" "$BUILD_TOOLS_PACKAGE"
+
+          # Current Android 17 preview repositories may expose the platform by codename
+          # even though the Android 17 setup guide uses compileSdk = 37. If necessary,
+          # expose that installed platform at the numeric API-level directory expected by AGP.
+          PLATFORM_ID="${PLATFORM_PACKAGE#platforms;}"
+          if [[ ! -e "$ANDROID_SDK_ROOT/platforms/android-37" && -d "$ANDROID_SDK_ROOT/platforms/$PLATFORM_ID" ]]; then
+            ln -s "$ANDROID_SDK_ROOT/platforms/$PLATFORM_ID" "$ANDROID_SDK_ROOT/platforms/android-37"
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
