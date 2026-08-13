@@ -10,16 +10,19 @@ import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.util.Collections
+import java.util.WeakHashMap
 
 /**
- * Keeps OplusFloatingIconView from publishing a freshly reconstructed full-color icon
- * before ThemedIcons has a chance to correct the final floating icon.
+ * Prevents Oplus' floating-icon pipeline from publishing or rendering a reconstructed
+ * full-color icon after ThemedIcons already themed the launcher BubbleTextView.
  *
- * OxygenOS' getOplusIconResult() can schedule IconLoadResult.onIconLoaded immediately
- * after writing IconLoadResult.drawable. The normal FloatingIconView#setIcon safety net
- * can therefore lose a race by one frame. This guard temporarily detaches that callback,
- * replaces the load result with the already-themed drawable currently shown by the
- * BubbleTextView, then dispatches the callback.
+ * There are two protections:
+ * 1. Hold IconLoadResult.onIconLoaded until its drawable is replaced by the icon that is
+ *    actually visible on the BubbleTextView.
+ * 2. Associate that themed icon with the FloatingIconView's ClipIconView and replace the
+ *    drawable again at the final ClipIconView#setIcon render sink. This closes the race
+ *    where onIconLoaded is registered while getOplusIconResult() is still running.
  */
 class OplusFloatingIconGuard : XposedModule() {
 
@@ -28,10 +31,19 @@ class OplusFloatingIconGuard : XposedModule() {
         private const val TARGET_PACKAGE = "com.android.launcher"
         private const val OPLUS_FLOATING_ICON_VIEW_CLASS =
             "com.android.launcher3.views.OplusFloatingIconView"
+        private const val CLIP_ICON_VIEW_CLASS =
+            "com.android.launcher3.views.ClipIconView"
+        private const val OPLUS_CLIP_ICON_VIEW_CLASS =
+            "com.android.launcher3.views.OplusClipIconView"
     }
 
     @Volatile
     private var hooksInstalled = false
+
+    // FloatingIconView/ClipIconView are short-lived/reused launcher views. Weak keys avoid
+    // retaining them, while every new animation refreshes or removes its override.
+    private val clipIconOverrides =
+        Collections.synchronizedMap(WeakHashMap<Any, Drawable>())
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
@@ -45,22 +57,39 @@ class OplusFloatingIconGuard : XposedModule() {
     }
 
     private fun installHooks(classLoader: ClassLoader) {
-        val clazz = Class.forName(OPLUS_FLOATING_ICON_VIEW_CLASS, false, classLoader)
+        val floatingClass = Class.forName(OPLUS_FLOATING_ICON_VIEW_CLASS, false, classLoader)
 
-        hookAllNamedMethods(clazz, "getOplusIconResult", "oplus-result") { chain ->
+        hookAllNamedMethods(floatingClass, "getOplusIconResult", "oplus-result") { chain ->
             val args = chain.args.toTypedArray()
             interceptOplusIconResult(chain, args)
         }
         moduleLog("hooked OplusFloatingIconView#getOplusIconResult")
 
-        // Keep the cached result coherent for the synchronous local-icon path as well.
-        hookAllNamedMethods(clazz, "fetchAndFillLocalIcon", "oplus-local") { chain ->
+        hookAllNamedMethods(floatingClass, "fetchAndFillLocalIcon", "oplus-local") { chain ->
             val args = chain.args.toTypedArray()
+            beforeFetchAndFillLocalIcon(chain.thisObject, args)
             val result = chain.proceed(args)
             afterFetchAndFillLocalIcon(chain.thisObject, args)
             result
         }
         moduleLog("hooked OplusFloatingIconView#fetchAndFillLocalIcon")
+
+        // OplusClipIconView overrides setIcon and calls into the base implementation on
+        // this launcher build. Hook both so the final render input is covered even if the
+        // implementation changes which level performs the actual drawing.
+        listOf(CLIP_ICON_VIEW_CLASS, OPLUS_CLIP_ICON_VIEW_CLASS).forEach { className ->
+            runCatching {
+                val clipClass = Class.forName(className, false, classLoader)
+                hookAllNamedMethods(clipClass, "setIcon", "clip-setIcon") { chain ->
+                    val args = chain.args.toTypedArray()
+                    beforeClipSetIcon(chain.thisObject, args)
+                    chain.proceed(args)
+                }
+                moduleLog("hooked $className#setIcon")
+            }.onFailure {
+                moduleLog("$className hook skipped: ${it.message}")
+            }
+        }
     }
 
     private fun hookAllNamedMethods(
@@ -76,7 +105,7 @@ class OplusFloatingIconGuard : XposedModule() {
             method.isAccessible = true
             val signature = method.parameterTypes.joinToString(",") { it.name }
             hook(method)
-                .setId("$hookIdPrefix($signature)")
+                .setId("$hookIdPrefix-${clazz.simpleName}($signature)")
                 .intercept { chain -> interceptor(chain) }
         }
     }
@@ -91,13 +120,14 @@ class OplusFloatingIconGuard : XposedModule() {
         val itemInfo = args.getOrNull(2)
         val loadResult = args.getOrNull(4)
 
+        rememberClipOverride(chain.thisObject, originalView, itemInfo)
+
         if (loadResult == null || itemInfo == null || !shouldPatch(itemInfo)) {
             return chain.proceed(args)
         }
 
-        // Oplus may execute this callback from inside getOplusIconResult() immediately
-        // after publishing an unthemed drawable. Detach it so no frame can observe that
-        // intermediate result.
+        // If checkIconResult() has already registered its callback, prevent Oplus from
+        // scheduling it with the intermediate reconstructed drawable.
         val pendingCallback = readField(loadResult, "onIconLoaded") as? Runnable
         if (pendingCallback != null) {
             writeField(loadResult, "onIconLoaded", null)
@@ -108,8 +138,6 @@ class OplusFloatingIconGuard : XposedModule() {
             val patched = patchLoadResult(loadResult, originalView)
 
             if (pendingCallback != null) {
-                // Match Oplus' one-shot callback semantics, but only after the drawable
-                // has been replaced with the already-themed BubbleTextView icon.
                 writeField(loadResult, "onIconLoaded", pendingCallback)
                 dispatchOnMain(chain.thisObject, originalView, pendingCallback)
                 writeField(loadResult, "onIconLoaded", null)
@@ -121,12 +149,17 @@ class OplusFloatingIconGuard : XposedModule() {
             )
             result
         } catch (error: Throwable) {
-            // Preserve the callback if the original method itself fails before completion.
             if (pendingCallback != null && readField(loadResult, "onIconLoaded") == null) {
                 runCatching { writeField(loadResult, "onIconLoaded", pendingCallback) }
             }
             throw error
         }
+    }
+
+    private fun beforeFetchAndFillLocalIcon(owner: Any?, args: Array<Any?>) {
+        val originalView = args.getOrNull(1) as? View
+        val itemInfo = args.getOrNull(2)
+        rememberClipOverride(owner, originalView, itemInfo)
     }
 
     private fun afterFetchAndFillLocalIcon(owner: Any?, args: Array<Any?>) {
@@ -140,6 +173,45 @@ class OplusFloatingIconGuard : XposedModule() {
         }
     }
 
+    private fun rememberClipOverride(owner: Any?, originalView: View?, itemInfo: Any?) {
+        val clipView = readField(owner, "mClipIconView") ?: return
+
+        if (itemInfo == null || !shouldPatch(itemInfo) || originalView == null) {
+            clipIconOverrides.remove(clipView)
+            return
+        }
+
+        val currentIcon = invokeNoArg(originalView, "getIcon") as? Drawable
+        if (currentIcon == null) {
+            clipIconOverrides.remove(clipView)
+            return
+        }
+
+        val snapshot = cloneDrawable(currentIcon, originalView.context)
+        snapshot.bounds = currentIcon.bounds
+        clipIconOverrides[clipView] = snapshot
+        moduleLog(
+            "clip override armed pkg=${resolvePackageName(itemInfo)} " +
+                "drawable=${currentIcon.javaClass.simpleName}"
+        )
+    }
+
+    private fun beforeClipSetIcon(owner: Any?, args: Array<Any?>) {
+        val clipView = owner ?: return
+        val override = clipIconOverrides[clipView] ?: return
+        val context = (owner as? View)?.context ?: return
+        val originalArg = args.firstOrNull() as? Drawable
+
+        val replacement = cloneDrawable(override, context)
+        replacement.bounds = originalArg?.bounds ?: override.bounds
+        args[0] = replacement
+
+        moduleLog(
+            "clip sink forced ${owner.javaClass.simpleName}: " +
+                "${originalArg?.javaClass?.simpleName} -> ${replacement.javaClass.simpleName}"
+        )
+    }
+
     private fun patchLoadResult(loadResult: Any, originalView: View?): Boolean {
         val view = originalView ?: return false
         val currentIcon = invokeNoArg(view, "getIcon") as? Drawable ?: return false
@@ -148,12 +220,9 @@ class OplusFloatingIconGuard : XposedModule() {
         drawable.bounds = currentIcon.bounds
         writeField(loadResult, "drawable", drawable)
 
-        // Some Oplus paths retain a separate BubbleTextView drawable snapshot.
         val btvDrawable = cloneDrawable(currentIcon, view.context)
         btvDrawable.bounds = currentIcon.bounds
         runCatching { writeField(loadResult, "btvDrawable", btvDrawable) }
-
-        // Present on some launcher revisions; harmlessly ignored when absent.
         runCatching { writeField(loadResult, "isThemed", true) }
         return true
     }
