@@ -1,0 +1,327 @@
+package com.atuy.oos_lancher_customizer
+
+import android.content.ComponentName
+import android.content.Context
+import android.graphics.drawable.Drawable
+import android.util.Log
+import android.util.LruCache
+import android.view.View
+import io.github.libxposed.api.XposedInterface
+import io.github.libxposed.api.XposedModule
+import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
+import java.lang.reflect.Field
+import java.lang.reflect.Method
+import java.util.Collections
+import java.util.WeakHashMap
+
+/**
+ * Keeps the OxygenOS swipe-to-home IconSurface animation visually identical to the icon
+ * currently rendered by the launcher.
+ *
+ * OOS has a second app-close pipeline under anim/iconsurfacemanager. It is used by
+ * AbsSwipeUpHandler/RecentsTransitionHandler and does not necessarily pass through
+ * FloatingIconView or ClipIconView. IconViewManager can reconstruct the package icon,
+ * which drops this module's BitmapDrawable themed icon for a few animation frames.
+ *
+ * We snapshot the final BubbleTextView icon after setIcon has completed, associate the
+ * requested ItemInfo with the target View, and replace both IconViewManager results and
+ * IconSurfaceRecord's final Drawable with that snapshot.
+ */
+class OplusIconSurfaceGuard : XposedModule() {
+
+    companion object {
+        private const val TAG = "OOS16_ThemedSurfaceGuard"
+        private const val TARGET_PACKAGE = "com.android.launcher"
+        private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
+        private const val ICON_VIEW_MANAGER_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.IconViewManager"
+        private const val ICON_SURFACE_RECORD_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.IconSurfaceRecord"
+    }
+
+    @Volatile
+    private var hooksInstalled = false
+
+    // Drawable.ConstantState is enough to create an independent drawable for each frame/
+    // surface without sharing mutable bounds or tint state.
+    private val themedStates = object : LruCache<String, Drawable.ConstantState>(256) {}
+
+    // A folder-close animation may target a FolderIcon while ItemInfo still identifies the
+    // app that is returning home. Remember that association until the short-lived View is
+    // released.
+    private val targetOverrides =
+        Collections.synchronizedMap(WeakHashMap<View, Drawable.ConstantState>())
+
+    override fun onPackageLoaded(param: PackageLoadedParam) {
+        if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
+
+        runCatching {
+            installHooks(param.defaultClassLoader)
+            hooksInstalled = true
+        }.onFailure {
+            moduleLog("critical: ${it.message}", it)
+        }
+    }
+
+    private fun installHooks(classLoader: ClassLoader) {
+        val bubbleClass = Class.forName(BTV_CLASS, false, classLoader)
+        hookAllNamedMethods(bubbleClass, "setIcon", "surface-cache-bubble") { chain ->
+            val args = chain.args.toTypedArray()
+            val result = chain.proceed(args)
+            cacheRenderedBubbleIcon(chain.thisObject)
+            result
+        }
+        moduleLog("hooked BubbleTextView#setIcon for IconSurface cache")
+
+        val managerClass = Class.forName(ICON_VIEW_MANAGER_CLASS, false, classLoader)
+
+        hookAllNamedMethods(managerClass, "fetchIcon", "surface-fetchIcon") { chain ->
+            val args = chain.args.toTypedArray()
+            armTargetOverride(args)
+            chain.proceed(args)
+        }
+
+        hookAllNamedMethods(
+            managerClass,
+            "getIconResultForAsync",
+            "surface-async-result"
+        ) { chain ->
+            val args = chain.args.toTypedArray()
+            armTargetOverride(args)
+            replaceDrawableArgumentFromItemInfo(args)
+            chain.proceed(args)
+        }
+
+        hookAllNamedMethods(
+            managerClass,
+            "getFancyIconBitmapDrawable",
+            "surface-fancy-result"
+        ) { chain ->
+            val args = chain.args.toTypedArray()
+            val original = chain.proceed(args)
+            replacementForItemInfo(args.getOrNull(1), args.getOrNull(0) as? Context)
+                ?: original
+        }
+
+        hookAllNamedMethods(
+            managerClass,
+            "prepareSeedlingDrawable",
+            "surface-seedling"
+        ) { chain ->
+            val args = chain.args.toTypedArray()
+            val view = args.firstOrNull() as? View
+            val replacement = replacementForView(view)
+            if (replacement != null) {
+                moduleLog("seedling forced view=${view?.javaClass?.simpleName}")
+                replacement
+            } else {
+                chain.proceed(args)
+            }
+        }
+        moduleLog("hooked IconViewManager IconSurface sources")
+
+        val recordClass = Class.forName(ICON_SURFACE_RECORD_CLASS, false, classLoader)
+        hookAllNamedMethods(recordClass, "onIconLoaded", "surface-final-sink") { chain ->
+            val args = chain.args.toTypedArray()
+            beforeIconSurfaceLoaded(args)
+            chain.proceed(args)
+        }
+        moduleLog("hooked IconSurfaceRecord#onIconLoaded")
+    }
+
+    private fun hookAllNamedMethods(
+        clazz: Class<*>,
+        methodName: String,
+        hookIdPrefix: String,
+        interceptor: (XposedInterface.Chain) -> Any?
+    ) {
+        val methods = clazz.declaredMethods.filter { it.name == methodName }
+        check(methods.isNotEmpty()) { "${clazz.name}#$methodName not found" }
+
+        methods.forEach { method ->
+            method.isAccessible = true
+            val signature = method.parameterTypes.joinToString(",") { it.name }
+            hook(method)
+                .setId("$hookIdPrefix-${clazz.simpleName}($signature)")
+                .intercept { chain -> interceptor(chain) }
+        }
+    }
+
+    private fun cacheRenderedBubbleIcon(owner: Any?) {
+        val view = owner as? View ?: return
+        val itemInfo = runCatching { view.tag }.getOrNull() ?: return
+        val pkg = resolvePackageName(itemInfo) ?: return
+        if (!shouldPatch(pkg)) return
+
+        val current = invokeNoArg(view, "getIcon") as? Drawable ?: return
+        val state = current.constantState ?: return
+        themedStates.put(pkg, state)
+    }
+
+    /**
+     * Both known methods start with (Launcher, View, ItemInfo, ...), so this also works for
+     * a FolderIcon target: the weak View mapping retains the app-specific themed drawable.
+     */
+    private fun armTargetOverride(args: Array<Any?>) {
+        val view = args.getOrNull(1) as? View ?: return
+        val itemInfo = args.getOrNull(2) ?: return
+        val pkg = resolvePackageName(itemInfo) ?: return
+        if (!shouldPatch(pkg)) return
+
+        val state = themedStates.get(pkg) ?: return
+        targetOverrides[view] = state
+        moduleLog("surface override armed pkg=$pkg view=${view.javaClass.simpleName}")
+    }
+
+    private fun replaceDrawableArgumentFromItemInfo(args: Array<Any?>) {
+        val context = (args.getOrNull(0) as? Context)
+            ?: (args.getOrNull(1) as? View)?.context
+            ?: return
+        val itemInfo = args.getOrNull(2) ?: return
+        val pkg = resolvePackageName(itemInfo) ?: return
+        if (!shouldPatch(pkg)) return
+
+        val state = themedStates.get(pkg) ?: return
+        val drawableIndex = args.indexOfFirst { it is Drawable }
+        if (drawableIndex < 0) return
+
+        val original = args[drawableIndex] as? Drawable
+        val replacement = newDrawable(state, context)
+        replacement.bounds = original?.bounds ?: replacement.bounds
+        args[drawableIndex] = replacement
+        moduleLog(
+            "async source forced pkg=$pkg ${original?.javaClass?.simpleName} -> " +
+                replacement.javaClass.simpleName
+        )
+    }
+
+    private fun replacementForItemInfo(itemInfo: Any?, context: Context?): Drawable? {
+        if (itemInfo == null || context == null) return null
+        val pkg = resolvePackageName(itemInfo) ?: return null
+        if (!shouldPatch(pkg)) return null
+        val state = themedStates.get(pkg) ?: return null
+        val replacement = newDrawable(state, context)
+        moduleLog("fancy source forced pkg=$pkg")
+        return replacement
+    }
+
+    private fun replacementForView(view: View?): Drawable? {
+        if (view == null) return null
+
+        targetOverrides[view]?.let { return newDrawable(it, view.context) }
+
+        val itemInfo = runCatching { view.tag }.getOrNull()
+        val pkg = itemInfo?.let(::resolvePackageName)
+        if (pkg != null && shouldPatch(pkg)) {
+            themedStates.get(pkg)?.let { return newDrawable(it, view.context) }
+        }
+
+        // Direct workspace icons expose getIcon(). Returning the drawable the user is
+        // literally seeing is preferable to letting OOS reconstruct a package icon.
+        val current = invokeNoArg(view, "getIcon") as? Drawable ?: return null
+        return cloneDrawable(current, view.context)
+    }
+
+    private fun beforeIconSurfaceLoaded(args: Array<Any?>) {
+        // Current OOS signature:
+        // (View, SurfaceSession, Launcher, boolean, LoadSurfaceSizeParams, boolean,
+        //  Drawable, boolean, boolean, RectF, IconSurfaceCallback)
+        val view = args.firstOrNull() as? View ?: return
+        val drawableIndex = args.indexOfFirst { it is Drawable }
+        if (drawableIndex < 0) return
+
+        val replacement = replacementForView(view) ?: return
+        val original = args[drawableIndex] as? Drawable
+        replacement.bounds = original?.bounds ?: replacement.bounds
+        args[drawableIndex] = replacement
+
+        moduleLog(
+            "surface sink forced view=${view.javaClass.simpleName} " +
+                "${original?.javaClass?.simpleName} -> ${replacement.javaClass.simpleName}"
+        )
+    }
+
+    private fun newDrawable(state: Drawable.ConstantState, context: Context): Drawable {
+        return state.newDrawable(context.resources).mutate()
+    }
+
+    private fun cloneDrawable(drawable: Drawable, context: Context): Drawable {
+        return runCatching {
+            drawable.constantState?.newDrawable(context.resources)?.mutate()
+        }.getOrNull() ?: drawable
+    }
+
+    private fun shouldPatch(pkg: String): Boolean {
+        return pkg.isNotBlank() && pkg != TARGET_PACKAGE
+    }
+
+    private fun resolvePackageName(itemInfo: Any): String? {
+        (readField(itemInfo, "componentName") as? ComponentName)
+            ?.packageName
+            ?.let { return it }
+
+        (invokeNoArg(itemInfo, "getTargetComponent") as? ComponentName)
+            ?.packageName
+            ?.let { return it }
+
+        (invokeNoArg(itemInfo, "getMTargetComponent") as? ComponentName)
+            ?.packageName
+            ?.let { return it }
+
+        (readField(itemInfo, "packageName") as? String)
+            ?.takeIf { it.contains('.') }
+            ?.let { return it }
+
+        (invokeNoArg(itemInfo, "getTargetPackage") as? String)
+            ?.takeIf { it.contains('.') }
+            ?.let { return it }
+
+        return null
+    }
+
+    private fun findField(owner: Any, name: String): Field? {
+        var cls: Class<*>? = owner.javaClass
+        while (cls != null) {
+            val current = cls
+            val field = runCatching {
+                current.getDeclaredField(name).apply { isAccessible = true }
+            }.getOrNull()
+            if (field != null) return field
+            cls = current.superclass
+        }
+        return null
+    }
+
+    private fun readField(owner: Any?, name: String): Any? {
+        if (owner == null) return null
+        return runCatching { findField(owner, name)?.get(owner) }.getOrNull()
+    }
+
+    private fun findNoArgMethod(owner: Any, name: String): Method? {
+        var cls: Class<*>? = owner.javaClass
+        while (cls != null) {
+            val current = cls
+            val method = current.declaredMethods.firstOrNull {
+                it.name == name && it.parameterCount == 0
+            }
+            if (method != null) {
+                method.isAccessible = true
+                return method
+            }
+            cls = current.superclass
+        }
+        return null
+    }
+
+    private fun invokeNoArg(owner: Any, name: String): Any? {
+        return runCatching { findNoArgMethod(owner, name)?.invoke(owner) }.getOrNull()
+    }
+
+    private fun moduleLog(msg: String, throwable: Throwable? = null) {
+        if (throwable == null) {
+            log(Log.INFO, TAG, msg)
+        } else {
+            log(Log.ERROR, TAG, msg, throwable)
+        }
+    }
+}
