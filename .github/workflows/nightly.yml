@@ -31,6 +31,9 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
+          # ubuntu-latest already contains this version. Pin it instead of following the
+          # action's moving default, which can briefly point at a not-yet-published archive.
+          cmdline-tools-version: '12.0'
 
       - name: Install Android 17 SDK
         shell: bash
@@ -73,9 +76,6 @@ jobs:
           echo "Installing $PLATFORM_PACKAGE and $BUILD_TOOLS_PACKAGE"
           sdkmanager --channel=3 "$PLATFORM_PACKAGE" "$BUILD_TOOLS_PACKAGE"
 
-          # Current Android 17 preview repositories may expose the platform by codename
-          # even though the Android 17 setup guide uses compileSdk = 37. If necessary,
-          # expose that installed platform at the numeric API-level directory expected by AGP.
           PLATFORM_ID="${PLATFORM_PACKAGE#platforms;}"
           if [[ ! -e "$ANDROID_SDK_ROOT/platforms/android-37" && -d "$ANDROID_SDK_ROOT/platforms/$PLATFORM_ID" ]]; then
             ln -s "$ANDROID_SDK_ROOT/platforms/$PLATFORM_ID" "$ANDROID_SDK_ROOT/platforms/android-37"
