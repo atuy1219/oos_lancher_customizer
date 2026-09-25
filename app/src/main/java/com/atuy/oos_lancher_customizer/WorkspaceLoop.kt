@@ -1,13 +1,9 @@
 package com.atuy.oos_lancher_customizer
 
-import android.animation.Animator
-import android.animation.AnimatorListenerAdapter
 import android.content.SharedPreferences
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
-import android.view.animation.AccelerateInterpolator
-import android.view.animation.DecelerateInterpolator
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
@@ -17,17 +13,15 @@ import java.util.Collections
 import java.util.WeakHashMap
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Optional wrap-around paging for the home-screen Workspace.
  *
- * Oplus uses two independent scrolling engines at the workspace edge: PagedView.mScroller and
- * OplusPagedViewImpl.mSpringOverScroller. A wrap stops both before changing pages.
- *
- * The first and last pages are not adjacent in PagedView's real coordinate space, so using
- * snapToPage() for the wrap would animate through every intermediate page. Instead, the Workspace
- * itself exits one screen in the swipe direction, the destination page is switched while offscreen,
- * and the Workspace re-enters from the opposite side.
+ * The wrap animation is not implemented by this module. Instead, the destination page is
+ * temporarily placed one logical screen beyond the current edge, then Oplus Launcher's own
+ * snapToPage() path performs the transition using its normal OverScroller, interpolator,
+ * page transition callbacks, effects, and page-indicator updates.
  */
 class WorkspaceLoop : XposedModule() {
 
@@ -36,15 +30,28 @@ class WorkspaceLoop : XposedModule() {
         private const val TARGET_PACKAGE = "com.android.launcher"
         private const val PAGED_VIEW_CLASS = "com.android.launcher3.PagedView"
         private const val WORKSPACE_CLASS = "com.android.launcher3.OplusWorkspace"
-
-        private const val WRAP_EXIT_DURATION_MS = 110L
-        private const val WRAP_ENTER_DURATION_MS = 180L
     }
 
     private data class TouchStart(
         val x: Float,
         val y: Float,
         val page: Int
+    )
+
+    private data class MovedPage(
+        val view: View,
+        val originalLeft: Int
+    )
+
+    private data class NativeWrapState(
+        val source: String,
+        val targetPage: Int,
+        val realTargetScroll: Int,
+        val originalMinScroll: Int,
+        val originalMaxScroll: Int,
+        val pageScrolls: IntArray,
+        val originalPageScrolls: IntArray,
+        val movedPages: List<MovedPage>
     )
 
     @Volatile
@@ -54,10 +61,12 @@ class WorkspaceLoop : XposedModule() {
     private var loopEnabled = false
 
     private var remotePrefs: SharedPreferences? = null
-    private val touchStarts = Collections.synchronizedMap(WeakHashMap<Any, TouchStart>())
-    private val animatingViews = Collections.synchronizedSet(
-        Collections.newSetFromMap(WeakHashMap<View, Boolean>())
-    )
+
+    private val touchStarts =
+        Collections.synchronizedMap(WeakHashMap<Any, TouchStart>())
+
+    private val activeWraps =
+        Collections.synchronizedMap(WeakHashMap<Any, NativeWrapState>())
 
     private val prefListener =
         SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -112,8 +121,7 @@ class WorkspaceLoop : XposedModule() {
                     return@intercept chain.proceed()
                 }
 
-                val workspaceView = owner as? View
-                if (workspaceView != null && animatingViews.contains(workspaceView)) {
+                if (activeWraps.containsKey(owner)) {
                     touchStarts.remove(owner)
                     return@intercept true
                 }
@@ -140,8 +148,8 @@ class WorkspaceLoop : XposedModule() {
                                 null
                             }
 
-                        // Let Oplus finish its normal UP handling first. This releases the
-                        // velocity tracker and closes the normal page-drag interaction.
+                        // Let Oplus finish the ordinary edge gesture first. This releases the
+                        // VelocityTracker and any touch state before the native snap starts.
                         val result = chain.proceed()
 
                         if (
@@ -149,8 +157,7 @@ class WorkspaceLoop : XposedModule() {
                             start != null &&
                             stillAtSameEdge(owner, start, wrapTarget)
                         ) {
-                            val direction = if (wrapTarget == 0) -1 else 1
-                            animateWrap(owner, wrapTarget, "touch", direction)
+                            startNativeWrap(owner, wrapTarget, "touch")
                         }
                         result
                     }
@@ -164,9 +171,27 @@ class WorkspaceLoop : XposedModule() {
                 }
             }
 
+        // PagedView.pageEndTransition() invokes this virtual method after mCurrentPage has
+        // already been switched. Restore the real coordinates before OplusWorkspace runs its
+        // own transition-end bookkeeping, so the launcher only observes a normal final state.
+        val workspacePageEnd = workspaceClass.getDeclaredMethod(
+            "onPageEndTransition"
+        ).apply { isAccessible = true }
+
+        hook(workspacePageEnd)
+            .setId("workspace-loop-native-page-end")
+            .setPriority(XposedInterface.PRIORITY_HIGHEST)
+            .intercept { chain ->
+                chain.thisObject?.let { owner ->
+                    finishNativeWrap(owner)
+                }
+                chain.proceed()
+            }
+
         hookEdgeNavigation(pagedViewClass, workspaceClass, "scrollLeft", wrapToLast = true)
         hookEdgeNavigation(pagedViewClass, workspaceClass, "scrollRight", wrapToLast = false)
-        moduleLog("hooked OplusWorkspace touch and animated edge navigation")
+
+        moduleLog("hooked OplusWorkspace native wrap animation")
     }
 
     private fun calculateTouchWrapTarget(
@@ -178,6 +203,8 @@ class WorkspaceLoop : XposedModule() {
         if (pageCount <= 1) return null
 
         val last = validatedLastPage(owner, pageCount)
+        if (last <= 0) return null
+
         val dx = event.x - start.x
         val dy = event.y - start.y
         val density = (owner as? View)?.resources?.displayMetrics?.density ?: 1f
@@ -186,6 +213,7 @@ class WorkspaceLoop : XposedModule() {
 
         if (abs(dx) < threshold || abs(dx) <= abs(dy)) return null
 
+        // This supplied OplusLauncher build reports isPageOrderFlipped() == false.
         return when {
             start.page <= 0 && dx > 0f -> last
             start.page >= last && dx < 0f -> 0
@@ -212,6 +240,7 @@ class WorkspaceLoop : XposedModule() {
         wrapToLast: Boolean
     ) {
         val method = pagedViewClass.getDeclaredMethod(methodName).apply { isAccessible = true }
+
         hook(method)
             .setId("workspace-loop-$methodName")
             .setPriority(XposedInterface.PRIORITY_HIGHEST)
@@ -221,8 +250,7 @@ class WorkspaceLoop : XposedModule() {
                     return@intercept chain.proceed()
                 }
 
-                val workspaceView = owner as? View
-                if (workspaceView != null && animatingViews.contains(workspaceView)) {
+                if (activeWraps.containsKey(owner)) {
                     return@intercept true
                 }
 
@@ -236,141 +264,192 @@ class WorkspaceLoop : XposedModule() {
                     ?: return@intercept chain.proceed()
 
                 val last = validatedLastPage(owner, pageCount)
+                if (last <= 0) return@intercept chain.proceed()
+
                 val atEdge = if (wrapToLast) current <= 0 else current >= last
                 if (!atEdge) return@intercept chain.proceed()
 
                 val target = if (wrapToLast) last else 0
-                val direction = if (wrapToLast) 1 else -1
-                if (animateWrap(owner, target, methodName, direction)) true else chain.proceed()
+                if (startNativeWrap(owner, target, methodName)) true else chain.proceed()
             }
     }
 
-    private fun animateWrap(
+    private fun startNativeWrap(
         owner: Any,
         target: Int,
-        source: String,
-        direction: Int
+        source: String
     ): Boolean {
-        val view = owner as? View ?: return wrapTo(owner, target, source)
-        if (!animatingViews.add(view)) return true
+        if (activeWraps.containsKey(owner)) return true
 
-        val width = max(view.width, view.measuredWidth).toFloat()
-        if (width <= 0f) {
-            animatingViews.remove(view)
-            return wrapTo(owner, target, source)
+        val workspace = owner as? View ?: return false
+        val pageCount = invokeIntNoArg(owner, "getPageCount") ?: return false
+        val panelCount = max(1, invokeIntNoArg(owner, "getPanelCount") ?: 1)
+        val currentPage = invokeIntNoArg(owner, "getCurrentPage") ?: return false
+        val lastPage = validatedLastPage(owner, pageCount)
+        if (lastPage <= 0) return false
+
+        // Finish the edge spring created by ACTION_UP before constructing a native page snap.
+        cancelOplusScrollState(owner)
+
+        val realCurrentScroll = invokeIntOneArg(owner, "getScrollForPage", currentPage)
+            ?: return false
+        val realTargetScroll = invokeIntOneArg(owner, "getScrollForPage", target)
+            ?: return false
+
+        val innerPage = if (target == 0) {
+            max(0, currentPage - panelCount)
+        } else {
+            min(lastPage, currentPage + panelCount)
         }
 
-        val baseTranslation = view.translationX
+        val innerScroll = invokeIntOneArg(owner, "getScrollForPage", innerPage)
+            ?: realCurrentScroll
 
-        return runCatching {
-            cancelOplusScrollState(owner)
-
-            val exitTranslation = baseTranslation + (direction * width)
-            val enterTranslation = baseTranslation - (direction * width)
-
-            // We own Workspace.translationX only for the duration of this wrap.
-            view.animate().cancel()
-
-            var exitCancelled = false
-            view.animate()
-                .translationX(exitTranslation)
-                .setDuration(WRAP_EXIT_DURATION_MS)
-                .setInterpolator(AccelerateInterpolator(1.35f))
-                .setListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationCancel(animation: Animator) {
-                        exitCancelled = true
-                        cleanupWrapAnimation(view, baseTranslation)
-                    }
-
-                    override fun onAnimationEnd(animation: Animator) {
-                        view.animate().setListener(null)
-                        if (exitCancelled) return
-
-                        if (!wrapTo(owner, target, source)) {
-                            cleanupWrapAnimation(view, baseTranslation)
-                            return
-                        }
-
-                        // The old edge page is now fully outside the viewport. Place the
-                        // destination one screen beyond the opposite edge and slide it in.
-                        view.translationX = enterTranslation
-
-                        var enterCancelled = false
-                        view.animate()
-                            .translationX(baseTranslation)
-                            .setDuration(WRAP_ENTER_DURATION_MS)
-                            .setInterpolator(DecelerateInterpolator(1.35f))
-                            .setListener(object : AnimatorListenerAdapter() {
-                                override fun onAnimationCancel(animation: Animator) {
-                                    enterCancelled = true
-                                    cleanupWrapAnimation(view, baseTranslation)
-                                }
-
-                                override fun onAnimationEnd(animation: Animator) {
-                                    view.animate().setListener(null)
-                                    if (enterCancelled) return
-                                    view.translationX = baseTranslation
-                                    animatingViews.remove(view)
-                                    moduleLog("wrap animation complete via $source -> page $target")
-                                }
-                            })
-                            .start()
-                    }
-                })
-                .start()
-
-            moduleLog("wrap animation started via $source -> page $target direction=$direction")
-            true
-        }.getOrElse {
-            cleanupWrapAnimation(view, baseTranslation)
-            moduleLog("wrap animation failed via $source: ${it.message}", it)
-            false
+        var oneScreen = abs(realCurrentScroll - innerScroll)
+        if (oneScreen <= 0) {
+            oneScreen = max(workspace.width, workspace.measuredWidth)
         }
+        if (oneScreen <= 0) return false
+
+        // Last -> first continues towards increasing scroll; first -> last continues towards
+        // decreasing scroll. The destination becomes a temporary adjacent page in that direction.
+        val virtualTargetScroll =
+            if (target == 0) {
+                realCurrentScroll + oneScreen
+            } else {
+                realCurrentScroll - oneScreen
+            }
+
+        val offset = virtualTargetScroll - realTargetScroll
+        if (offset == 0) return false
+
+        val pageScrolls = readField(owner, "mPageScrolls") as? IntArray ?: return false
+        if (target !in pageScrolls.indices) return false
+
+        val originalPageScrolls = pageScrolls.clone()
+        val movedPages = ArrayList<MovedPage>(panelCount)
+
+        val lastTargetIndex = min(pageCount - 1, target + panelCount - 1)
+        for (index in target..lastTargetIndex) {
+            if (index in pageScrolls.indices) {
+                pageScrolls[index] = originalPageScrolls[index] + offset
+            }
+
+            val pageView =
+                invokeViewOneInt(owner, "getPageAt", index)
+                    ?: invokeViewOneInt(owner, "getChildAt", index)
+            if (pageView != null) {
+                movedPages += MovedPage(pageView, pageView.left)
+                pageView.offsetLeftAndRight(offset)
+            }
+        }
+
+        val originalMin = (readField(owner, "mMinScroll") as? Number)?.toInt()
+            ?: return restorePreparedWrapAndFail(
+                owner,
+                pageScrolls,
+                originalPageScrolls,
+                movedPages
+            )
+        val originalMax = (readField(owner, "mMaxScroll") as? Number)?.toInt()
+            ?: return restorePreparedWrapAndFail(
+                owner,
+                pageScrolls,
+                originalPageScrolls,
+                movedPages
+            )
+
+        var virtualMin = virtualTargetScroll
+        var virtualMax = virtualTargetScroll
+        for (index in target..lastTargetIndex) {
+            if (index in pageScrolls.indices) {
+                virtualMin = min(virtualMin, pageScrolls[index])
+                virtualMax = max(virtualMax, pageScrolls[index])
+            }
+        }
+
+        writeField(owner, "mMinScroll", min(originalMin, virtualMin))
+        writeField(owner, "mMaxScroll", max(originalMax, virtualMax))
+
+        val state = NativeWrapState(
+            source = source,
+            targetPage = target,
+            realTargetScroll = realTargetScroll,
+            originalMinScroll = originalMin,
+            originalMaxScroll = originalMax,
+            pageScrolls = pageScrolls,
+            originalPageScrolls = originalPageScrolls,
+            movedPages = movedPages
+        )
+        activeWraps[owner] = state
+
+        // This is the actual animation: call Oplus Launcher's existing snapToPage().
+        // Because mPageScrolls[target] is temporarily adjacent, all native duration,
+        // OverScroller/interpolator, transition callbacks, effects, and indicator handling run.
+        val snapped = invokeBooleanOneInt(owner, "snapToPage", target) ?: false
+        if (!snapped) {
+            activeWraps.remove(owner)
+            restoreNativeWrap(owner, state)
+            moduleLog("native snap rejected via $source")
+            return false
+        }
+
+        moduleLog(
+            "native wrap started via $source: current=$currentPage target=$target " +
+                "virtualTarget=$virtualTargetScroll offset=$offset"
+        )
+        return true
     }
 
-    private fun cleanupWrapAnimation(view: View, baseTranslation: Float) {
-        view.animate().setListener(null)
-        view.translationX = baseTranslation
-        animatingViews.remove(view)
+    private fun restorePreparedWrapAndFail(
+        owner: Any,
+        pageScrolls: IntArray,
+        originalPageScrolls: IntArray,
+        movedPages: List<MovedPage>
+    ): Boolean {
+        if (pageScrolls.size == originalPageScrolls.size) {
+            originalPageScrolls.copyInto(pageScrolls)
+        }
+        movedPages.forEach { moved ->
+            moved.view.offsetLeftAndRight(moved.originalLeft - moved.view.left)
+        }
+        (owner as? View)?.invalidate()
+        return false
+    }
+
+    private fun finishNativeWrap(owner: Any) {
+        val state = activeWraps.remove(owner) ?: return
+        restoreNativeWrap(owner, state)
+        moduleLog(
+            "native wrap complete via ${state.source} -> page ${state.targetPage}"
+        )
+    }
+
+    private fun restoreNativeWrap(owner: Any, state: NativeWrapState) {
+        if (
+            state.pageScrolls.size == state.originalPageScrolls.size &&
+            readField(owner, "mPageScrolls") === state.pageScrolls
+        ) {
+            state.originalPageScrolls.copyInto(state.pageScrolls)
+        }
+
+        state.movedPages.forEach { moved ->
+            moved.view.offsetLeftAndRight(moved.originalLeft - moved.view.left)
+        }
+
+        writeField(owner, "mMinScroll", state.originalMinScroll)
+        writeField(owner, "mMaxScroll", state.originalMaxScroll)
+
+        val view = owner as? View
+        val scrollY = view?.scrollY ?: 0
+        invokeVoidTwoInts(owner, "scrollTo", state.realTargetScroll, scrollY)
+        view?.invalidate()
     }
 
     private fun validatedLastPage(owner: Any, pageCount: Int): Int {
         if (pageCount <= 1) return 0
-        return invokeIntOneArg(owner, "validateNewPage", pageCount - 1) ?: (pageCount - 1)
-    }
-
-    private fun wrapTo(owner: Any, target: Int, source: String): Boolean {
-        return runCatching {
-            cancelOplusScrollState(owner)
-
-            val previous = invokeIntNoArg(owner, "getCurrentPage") ?: -1
-            val setPage = findMethod(
-                owner,
-                "setCurrentPage",
-                Int::class.javaPrimitiveType!!
-            ) ?: return false
-            setPage.invoke(owner, target)
-
-            val targetScroll = invokeIntOneArg(owner, "getScrollForPage", target)
-            if (targetScroll != null) {
-                invokeVoidTwoInts(owner, "scrollTo", targetScroll, 0)
-                writeField(owner, "mUnboundedScroll", targetScroll)
-                writeField(owner, "mLastScrollX", targetScroll)
-            }
-
-            writeField(owner, "mDiffScrollX", 0)
-            writeField(owner, "mLastAmount", 0)
-            writeField(owner, "mTempAmount", 0)
-            writeField(owner, "mOverScrollAmount", 0)
-            writeField(owner, "wasInOverscroll", false)
-            writeField(owner, "mNextPage", -1)
-
-            moduleLog("wrapped via $source: $previous -> $target")
-            true
-        }.getOrElse {
-            moduleLog("wrap failed via $source: ${it.message}", it)
-            false
-        }
+        return invokeIntOneArg(owner, "validateNewPage", pageCount - 1)
+            ?: (pageCount - 1)
     }
 
     private fun cancelOplusScrollState(owner: Any) {
@@ -384,6 +463,11 @@ class WorkspaceLoop : XposedModule() {
         writeField(owner, "mScrollMode", -1)
         writeField(owner, "mNextPage", -1)
         writeField(owner, "mIsBeingDragged", false)
+        writeField(owner, "mDiffScrollX", 0)
+        writeField(owner, "mLastAmount", 0)
+        writeField(owner, "mTempAmount", 0)
+        writeField(owner, "mOverScrollAmount", 0)
+        writeField(owner, "wasInOverscroll", false)
     }
 
     private fun invokeIntNoArg(owner: Any, name: String): Int? {
@@ -394,6 +478,16 @@ class WorkspaceLoop : XposedModule() {
     private fun invokeIntOneArg(owner: Any, name: String, value: Int): Int? {
         val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return null
         return runCatching { (method.invoke(owner, value) as? Number)?.toInt() }.getOrNull()
+    }
+
+    private fun invokeBooleanOneInt(owner: Any, name: String, value: Int): Boolean? {
+        val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return null
+        return runCatching { method.invoke(owner, value) as? Boolean }.getOrNull()
+    }
+
+    private fun invokeViewOneInt(owner: Any, name: String, value: Int): View? {
+        val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return null
+        return runCatching { method.invoke(owner, value) as? View }.getOrNull()
     }
 
     private fun invokeVoidNoArg(owner: Any, name: String) {
