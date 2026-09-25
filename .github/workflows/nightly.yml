@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/workspace-loop-setting
   workflow_dispatch:
 
 permissions:
@@ -100,7 +99,6 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Nightly release
-        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
