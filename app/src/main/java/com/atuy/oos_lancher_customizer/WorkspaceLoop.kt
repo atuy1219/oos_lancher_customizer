@@ -260,10 +260,11 @@ class WorkspaceLoop : XposedModule() {
             return wrapTo(owner, target, source)
         }
 
+        val baseTranslation = view.translationX
+
         return runCatching {
             cancelOplusScrollState(owner)
 
-            val baseTranslation = view.translationX
             val exitTranslation = baseTranslation + (direction * width)
             val enterTranslation = baseTranslation - (direction * width)
 
@@ -321,7 +322,7 @@ class WorkspaceLoop : XposedModule() {
             moduleLog("wrap animation started via $source -> page $target direction=$direction")
             true
         }.getOrElse {
-            cleanupWrapAnimation(view, view.translationX)
+            cleanupWrapAnimation(view, baseTranslation)
             moduleLog("wrap animation failed via $source: ${it.message}", it)
             false
         }
