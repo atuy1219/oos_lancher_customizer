@@ -68,6 +68,14 @@ class WorkspaceLoop : XposedModule() {
     private val activeWraps =
         Collections.synchronizedMap(WeakHashMap<Any, NativeWrapState>())
 
+    /**
+     * Only populated while Oplus' own ACTION_UP code is choosing a destination page.
+     * This lets the first native fling/snap target the wrapped page instead of starting
+     * an edge spring that we would have to cancel and restart one frame later.
+     */
+    private val destinationOverrides =
+        Collections.synchronizedMap(WeakHashMap<Any, Int>())
+
     private val prefListener =
         SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
             if (key == ModulePrefs.KEY_WORKSPACE_LOOP) {
@@ -148,17 +156,49 @@ class WorkspaceLoop : XposedModule() {
                                 null
                             }
 
-                        // Let Oplus finish the ordinary edge gesture first. This releases the
-                        // VelocityTracker and any touch state before the native snap starts.
-                        val result = chain.proceed()
+                        val prepared =
+                            if (
+                                wrapTarget != null &&
+                                start != null &&
+                                stillAtSameEdge(owner, start, wrapTarget)
+                            ) {
+                                // Prepare the opposite edge before Oplus handles ACTION_UP.
+                                // Its own springBack/fling/snap code now sees this page as the
+                                // adjacent destination, so we keep the original gesture velocity
+                                // and never start a second animation.
+                                prepareNativeWrap(owner, wrapTarget, "touch")
+                            } else {
+                                null
+                            }
+
+                        if (prepared != null) {
+                            destinationOverrides[owner] = wrapTarget!!
+                        }
+
+                        val result = try {
+                            chain.proceed()
+                        } catch (error: Throwable) {
+                            destinationOverrides.remove(owner)
+                            if (prepared != null && activeWraps.remove(owner) === prepared) {
+                                restoreNativeWrap(owner, prepared)
+                            }
+                            throw error
+                        } finally {
+                            destinationOverrides.remove(owner)
+                        }
 
                         if (
-                            wrapTarget != null &&
-                            start != null &&
-                            stillAtSameEdge(owner, start, wrapTarget)
+                            prepared != null &&
+                            activeWraps[owner] === prepared &&
+                            !hasNativeTransitionStarted(owner, prepared.targetPage)
                         ) {
-                            startNativeWrap(owner, wrapTarget, "touch")
+                            // Defensive fallback for launcher variants that do not start a
+                            // destination snap from this ACTION_UP path.
+                            activeWraps.remove(owner)
+                            restoreNativeWrap(owner, prepared)
+                            startNativeWrap(owner, prepared.targetPage, "touch-fallback")
                         }
+
                         result
                     }
 
@@ -169,6 +209,28 @@ class WorkspaceLoop : XposedModule() {
 
                     else -> chain.proceed()
                 }
+            }
+
+        pagedViewClass.declaredMethods
+            .filter { method ->
+                method.name == "getDestinationPage" &&
+                    method.returnType == Int::class.javaPrimitiveType
+            }
+            .forEach { method ->
+                method.isAccessible = true
+                val signature = method.parameterTypes.joinToString(",") { it.name }
+                hook(method)
+                    .setId("workspace-loop-destination($signature)")
+                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                    .intercept { chain ->
+                        val owner = chain.thisObject
+                        val override = owner?.let { destinationOverrides[it] }
+                        if (override != null) {
+                            override
+                        } else {
+                            chain.proceed()
+                        }
+                    }
             }
 
         // PagedView.pageEndTransition() invokes this virtual method after mCurrentPage has
@@ -281,20 +343,40 @@ class WorkspaceLoop : XposedModule() {
     ): Boolean {
         if (activeWraps.containsKey(owner)) return true
 
-        val workspace = owner as? View ?: return false
-        val pageCount = invokeIntNoArg(owner, "getPageCount") ?: return false
-        val panelCount = max(1, invokeIntNoArg(owner, "getPanelCount") ?: 1)
-        val currentPage = invokeIntNoArg(owner, "getCurrentPage") ?: return false
-        val lastPage = validatedLastPage(owner, pageCount)
-        if (lastPage <= 0) return false
-
-        // Finish the edge spring created by ACTION_UP before constructing a native page snap.
         cancelOplusScrollState(owner)
 
+        val state = prepareNativeWrap(owner, target, source) ?: return false
+
+        val snapped = invokeBooleanOneInt(owner, "snapToPage", target) ?: false
+        if (!snapped) {
+            activeWraps.remove(owner)
+            restoreNativeWrap(owner, state)
+            moduleLog("native snap rejected via $source")
+            return false
+        }
+
+        moduleLog("native wrap started via $source -> page $target")
+        return true
+    }
+
+    private fun prepareNativeWrap(
+        owner: Any,
+        target: Int,
+        source: String
+    ): NativeWrapState? {
+        if (activeWraps.containsKey(owner)) return activeWraps[owner]
+
+        val workspace = owner as? View ?: return null
+        val pageCount = invokeIntNoArg(owner, "getPageCount") ?: return null
+        val panelCount = max(1, invokeIntNoArg(owner, "getPanelCount") ?: 1)
+        val currentPage = invokeIntNoArg(owner, "getCurrentPage") ?: return null
+        val lastPage = validatedLastPage(owner, pageCount)
+        if (lastPage <= 0) return null
+
         val realCurrentScroll = invokeIntOneArg(owner, "getScrollForPage", currentPage)
-            ?: return false
+            ?: return null
         val realTargetScroll = invokeIntOneArg(owner, "getScrollForPage", target)
-            ?: return false
+            ?: return null
 
         val innerPage = if (target == 0) {
             max(0, currentPage - panelCount)
@@ -309,7 +391,7 @@ class WorkspaceLoop : XposedModule() {
         if (oneScreen <= 0) {
             oneScreen = max(workspace.width, workspace.measuredWidth)
         }
-        if (oneScreen <= 0) return false
+        if (oneScreen <= 0) return null
 
         // Last -> first continues towards increasing scroll; first -> last continues towards
         // decreasing scroll. The destination becomes a temporary adjacent page in that direction.
@@ -321,10 +403,10 @@ class WorkspaceLoop : XposedModule() {
             }
 
         val offset = virtualTargetScroll - realTargetScroll
-        if (offset == 0) return false
+        if (offset == 0) return null
 
-        val pageScrolls = readField(owner, "mPageScrolls") as? IntArray ?: return false
-        if (target !in pageScrolls.indices) return false
+        val pageScrolls = readField(owner, "mPageScrolls") as? IntArray ?: return null
+        if (target !in pageScrolls.indices) return null
 
         val originalPageScrolls = pageScrolls.clone()
         val movedPages = ArrayList<MovedPage>(panelCount)
@@ -345,14 +427,14 @@ class WorkspaceLoop : XposedModule() {
         }
 
         val originalMin = (readField(owner, "mMinScroll") as? Number)?.toInt()
-            ?: return restorePreparedWrapAndFail(
+            ?: return restorePreparedWrapAndNull(
                 owner,
                 pageScrolls,
                 originalPageScrolls,
                 movedPages
             )
         val originalMax = (readField(owner, "mMaxScroll") as? Number)?.toInt()
-            ?: return restorePreparedWrapAndFail(
+            ?: return restorePreparedWrapAndNull(
                 owner,
                 pageScrolls,
                 originalPageScrolls,
@@ -383,30 +465,22 @@ class WorkspaceLoop : XposedModule() {
         )
         activeWraps[owner] = state
 
-        // This is the actual animation: call Oplus Launcher's existing snapToPage().
-        // Because mPageScrolls[target] is temporarily adjacent, all native duration,
-        // OverScroller/interpolator, transition callbacks, effects, and indicator handling run.
-        val snapped = invokeBooleanOneInt(owner, "snapToPage", target) ?: false
-        if (!snapped) {
-            activeWraps.remove(owner)
-            restoreNativeWrap(owner, state)
-            moduleLog("native snap rejected via $source")
-            return false
-        }
+        workspace.invalidate()
+        movedPages.forEach { it.view.invalidate() }
 
         moduleLog(
-            "native wrap started via $source: current=$currentPage target=$target " +
+            "native wrap prepared via $source: current=$currentPage target=$target " +
                 "virtualTarget=$virtualTargetScroll offset=$offset"
         )
-        return true
+        return state
     }
 
-    private fun restorePreparedWrapAndFail(
+    private fun restorePreparedWrapAndNull(
         owner: Any,
         pageScrolls: IntArray,
         originalPageScrolls: IntArray,
         movedPages: List<MovedPage>
-    ): Boolean {
+    ): NativeWrapState? {
         if (pageScrolls.size == originalPageScrolls.size) {
             originalPageScrolls.copyInto(pageScrolls)
         }
@@ -414,7 +488,18 @@ class WorkspaceLoop : XposedModule() {
             moved.view.offsetLeftAndRight(moved.originalLeft - moved.view.left)
         }
         (owner as? View)?.invalidate()
-        return false
+        return null
+    }
+
+    private fun hasNativeTransitionStarted(owner: Any, target: Int): Boolean {
+        val nextPage = invokeIntNoArg(owner, "getNextPage")
+        if (nextPage == target) return true
+
+        val inTransition = invokeBooleanNoArg(owner, "isPageInTransition")
+        if (inTransition == true) return true
+
+        val scrollFinished = invokeBooleanNoArg(owner, "isScrollFinished")
+        return scrollFinished == false
     }
 
     private fun finishNativeWrap(owner: Any) {
@@ -478,6 +563,11 @@ class WorkspaceLoop : XposedModule() {
     private fun invokeIntOneArg(owner: Any, name: String, value: Int): Int? {
         val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return null
         return runCatching { (method.invoke(owner, value) as? Number)?.toInt() }.getOrNull()
+    }
+
+    private fun invokeBooleanNoArg(owner: Any, name: String): Boolean? {
+        val method = findMethod(owner, name) ?: return null
+        return runCatching { method.invoke(owner) as? Boolean }.getOrNull()
     }
 
     private fun invokeBooleanOneInt(owner: Any, name: String, value: Int): Boolean? {
