@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/use-native-loop-animation
   workflow_dispatch:
 
 concurrency:
