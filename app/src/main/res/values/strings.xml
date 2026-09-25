@@ -1,4 +1,12 @@
 <resources>
-    <string name="app_name">oos_lancher_customizer</string>
-    <string name="xposed_description">OOSのランチャーの旧テーマアイコンを強制する</string>
+    <string name="app_name">OOS Launcher Customizer</string>
+    <string name="xposed_description">OOS Launcher のテーマアイコン、Google Discover、ホーム画面動作をカスタマイズする</string>
+    <string name="discover_always_disabled">Google Discover はこのモジュールで無効化されています。</string>
+    <string name="workspace_loop_title">ホーム画面をループ</string>
+    <string name="workspace_loop_summary">先頭でさらに戻ると最後へ、最後でさらに進むと先頭へ移動します。</string>
+    <string name="xposed_service_waiting">Xposed サービスを待機しています…</string>
+    <string name="xposed_service_unavailable">Xposed サービスに接続できていません。フレームワーク側でモジュールが有効か確認してください。</string>
+    <string name="remote_preferences_unavailable">設定ストレージに接続できないため、現在は変更できません。</string>
+    <string name="xposed_service_connected">Xposed サービスに接続済み</string>
+    <string name="preference_write_failed">設定の保存に失敗しました。</string>
 </resources>
