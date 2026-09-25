@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - fix/smooth-native-loop
   workflow_dispatch:
 
 concurrency:
