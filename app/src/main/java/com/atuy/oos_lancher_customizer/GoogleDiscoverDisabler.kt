@@ -28,26 +28,30 @@ class GoogleDiscoverDisabler : XposedModule() {
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
 
-        var installed = 0
-        installed += hookBooleanGetter(
-            param.defaultClassLoader,
-            APP_FEATURE_UTILS,
-            "isSupportGoogleOverlay"
-        )
-        installed += hookBooleanSetterFalse(
-            param.defaultClassLoader,
-            APP_FEATURE_UTILS,
-            "setSupportGoogleOverlay"
-        )
-        installed += hookBooleanGetter(
-            param.defaultClassLoader,
-            OVERLAY_UTILS,
-            "selectedGoogleAssistantScreen"
-        )
+        runCatching {
+            var installed = 0
+            installed += hookBooleanGetter(
+                param.defaultClassLoader,
+                APP_FEATURE_UTILS,
+                "isSupportGoogleOverlay"
+            )
+            installed += hookBooleanSetterFalse(
+                param.defaultClassLoader,
+                APP_FEATURE_UTILS,
+                "setSupportGoogleOverlay"
+            )
+            installed += hookBooleanGetter(
+                param.defaultClassLoader,
+                OVERLAY_UTILS,
+                "selectedGoogleAssistantScreen"
+            )
 
-        check(installed > 0) { "No Google Discover hooks could be installed" }
-        hooksInstalled = true
-        moduleLog("Google Discover disabled; installed hooks=$installed")
+            check(installed > 0) { "No Google Discover hooks could be installed" }
+            hooksInstalled = true
+            moduleLog("Google Discover disabled; installed hooks=$installed")
+        }.onFailure {
+            moduleLog("critical: ${it.message}", it)
+        }
     }
 
     private fun hookBooleanGetter(
@@ -111,7 +115,11 @@ class GoogleDiscoverDisabler : XposedModule() {
         }.getOrDefault(0)
     }
 
-    private fun moduleLog(msg: String) {
-        log(Log.INFO, TAG, msg)
+    private fun moduleLog(msg: String, throwable: Throwable? = null) {
+        if (throwable == null) {
+            log(Log.INFO, TAG, msg)
+        } else {
+            log(Log.ERROR, TAG, msg, throwable)
+        }
     }
 }
