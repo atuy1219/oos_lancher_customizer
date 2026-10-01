@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
@@ -45,8 +46,12 @@ class WorkspaceLoop : XposedModule() {
 
     private data class NativeWrapState(
         val source: String,
+        val sourcePage: Int,
         val targetPage: Int,
+        var settling: Boolean = false,
+        val realSourceScroll: Int,
         val realTargetScroll: Int,
+        val pageWidth: Int,
         val originalMinScroll: Int,
         val originalMaxScroll: Int,
         val pageScrolls: IntArray,
@@ -67,14 +72,6 @@ class WorkspaceLoop : XposedModule() {
 
     private val activeWraps =
         Collections.synchronizedMap(WeakHashMap<Any, NativeWrapState>())
-
-    /**
-     * Only populated while Oplus' own ACTION_UP code is choosing a destination page.
-     * This lets the first native fling/snap target the wrapped page instead of starting
-     * an edge spring that we would have to cancel and restart one frame later.
-     */
-    private val destinationOverrides =
-        Collections.synchronizedMap(WeakHashMap<Any, Int>())
 
     private val prefListener =
         SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -114,124 +111,116 @@ class WorkspaceLoop : XposedModule() {
         val pagedViewClass = Class.forName(PAGED_VIEW_CLASS, false, classLoader)
         val workspaceClass = Class.forName(WORKSPACE_CLASS, false, classLoader)
 
-        val workspaceTouch = workspaceClass.getDeclaredMethod(
-            "onTouchEvent",
-            MotionEvent::class.java
+        // Child icons can own ACTION_DOWN until the workspace intercepts a move.
+        val dispatchTouch = workspaceClass.getDeclaredMethod(
+            "dispatchTouchEvent", MotionEvent::class.java
         ).apply { isAccessible = true }
+        hook(dispatchTouch).setId("workspace-loop-touch-start").intercept { chain ->
+            val owner = chain.thisObject
+            val event = chain.args[0] as? MotionEvent
+            if (owner != null && event?.actionMasked == MotionEvent.ACTION_DOWN) {
+                interruptNativeWrap(owner)
+                touchStarts[owner] = TouchStart(
+                    event.x, event.y, invokeIntNoArg(owner, "getCurrentPage") ?: 0
+                )
+            }
+            chain.proceed()
+        }
 
+        val workspaceTouch = workspaceClass.getDeclaredMethod(
+            "onTouchEvent", MotionEvent::class.java
+        ).apply { isAccessible = true }
         hook(workspaceTouch)
             .setId("workspace-loop-touch")
             .setPriority(XposedInterface.PRIORITY_HIGHEST)
             .intercept { chain ->
                 val owner = chain.thisObject
                 val event = chain.args[0] as? MotionEvent
-                if (owner == null || event == null) {
-                    return@intercept chain.proceed()
-                }
-
-                if (activeWraps.containsKey(owner)) {
-                    touchStarts.remove(owner)
-                    return@intercept true
-                }
-
+                if (owner == null || event == null) return@intercept chain.proceed()
                 if (!loopEnabled) {
+                    interruptNativeWrap(owner)
                     touchStarts.remove(owner)
                     return@intercept chain.proceed()
                 }
-
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        val page = invokeIntNoArg(owner, "getCurrentPage") ?: 0
-                        touchStarts[owner] = TouchStart(event.x, event.y, page)
-                        chain.proceed()
+                        touchStarts[owner] = TouchStart(
+                            event.x, event.y, invokeIntNoArg(owner, "getCurrentPage") ?: 0
+                        )
                     }
-
-                    MotionEvent.ACTION_UP -> {
-                        val start = touchStarts.remove(owner)
-                        val wasBeingDragged = readField(owner, "mIsBeingDragged") == true
-                        val wrapTarget =
-                            if (wasBeingDragged && start != null) {
-                                calculateTouchWrapTarget(owner, event, start)
-                            } else {
-                                null
-                            }
-
-                        val prepared =
-                            if (
-                                wrapTarget != null &&
-                                start != null &&
-                                stillAtSameEdge(owner, start, wrapTarget)
-                            ) {
-                                // Prepare the opposite edge before Oplus handles ACTION_UP.
-                                // Its own springBack/fling/snap code now sees this page as the
-                                // adjacent destination, so we keep the original gesture velocity
-                                // and never start a second animation.
-                                prepareNativeWrap(owner, wrapTarget, "touch")
-                            } else {
-                                null
-                            }
-
-                        if (prepared != null) {
-                            destinationOverrides[owner] = wrapTarget!!
-                        }
-
-                        val result = try {
-                            chain.proceed()
-                        } catch (error: Throwable) {
-                            destinationOverrides.remove(owner)
-                            if (prepared != null && activeWraps.remove(owner) === prepared) {
-                                restoreNativeWrap(owner, prepared)
-                            }
-                            throw error
-                        } finally {
-                            destinationOverrides.remove(owner)
-                        }
-
-                        if (
-                            prepared != null &&
-                            activeWraps[owner] === prepared &&
-                            !hasNativeTransitionStarted(owner, prepared.targetPage)
-                        ) {
-                            // Defensive fallback for launcher variants that do not start a
-                            // destination snap from this ACTION_UP path.
+                    MotionEvent.ACTION_MOVE -> {
+                        val start = touchStarts[owner]
+                        val state = activeWraps[owner]
+                        if (state != null && !state.settling && start != null &&
+                            ((state.targetPage == 0 && event.x >= start.x) ||
+                                (state.targetPage != 0 && event.x <= start.x))) {
+                            // Returning across the original edge restores its inner neighbour.
                             activeWraps.remove(owner)
-                            restoreNativeWrap(owner, prepared)
-                            startNativeWrap(owner, prepared.targetPage, "touch-fallback")
+                            restoreNativeWrap(owner, state, (owner as View).scrollX)
+                        } else if (state == null && start != null) {
+                            val target = calculateTouchWrapTarget(owner, event, start)
+                            if (target != null && stillAtSameEdge(owner, start, target)) {
+                                prepareNativeWrap(owner, target, "drag")
+                            }
                         }
-
-                        result
                     }
-
-                    MotionEvent.ACTION_CANCEL -> {
-                        touchStarts.remove(owner)
-                        chain.proceed()
-                    }
-
-                    else -> chain.proceed()
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> touchStarts.remove(owner)
                 }
+                // Keep Oplus' move events and velocity tracker alive throughout the gesture.
+                val result = try {
+                    chain.proceed()
+                } catch (error: Throwable) {
+                    interruptNativeWrap(owner)
+                    throw error
+                }
+                if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                    activeWraps[owner]?.settling = true
+                }
+                if ((event.actionMasked == MotionEvent.ACTION_UP ||
+                        event.actionMasked == MotionEvent.ACTION_CANCEL) &&
+                    invokeBooleanNoArg(owner, "isScrollFinished") == true) {
+                    finishNativeWrap(owner)
+                }
+                result
             }
 
-        pagedViewClass.declaredMethods
-            .filter { method ->
-                method.name == "getDestinationPage" &&
-                    method.returnType == Int::class.javaPrimitiveType
+        val release = workspaceClass.getDeclaredMethod(
+            "interceptUpEventWhenDragged",
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        hook(release).setId("workspace-loop-native-release").intercept { chain ->
+            val owner = chain.thisObject
+            val state = owner?.let { activeWraps[it] }
+            if (owner == null || state == null || state.settling) {
+                return@intercept chain.proceed()
             }
-            .forEach { method ->
-                method.isAccessible = true
-                val signature = method.parameterTypes.joinToString(",") { it.name }
-                hook(method)
-                    .setId("workspace-loop-destination($signature)")
-                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
-                    .intercept { chain ->
-                        val owner = chain.thisObject
-                        val override = owner?.let { destinationOverrides[it] }
-                        if (override != null) {
-                            override
-                        } else {
-                            chain.proceed()
-                        }
-                    }
+            val velocity = chain.args[0] as Int
+            val delta = chain.args[2] as Float
+            val size = chain.args[3] as Int
+            val significant = chain.args[4] as Boolean
+            val fling = chain.args[6] as Boolean
+            val wrap = WorkspaceLoopGesture.shouldWrap(
+                state.targetPage == 0, velocity, delta, size, significant, fling
+            )
+            val target = if (wrap) state.targetPage else state.sourcePage
+            state.settling = true
+            writeField(owner, "isFling", fling)
+            val snapped = invokeBooleanTwoInts(owner, "snapToPageWithVelocity", target, velocity)
+            if (snapped != true) {
+                state.settling = false
+                interruptNativeWrap(owner)
+                return@intercept chain.proceed()
             }
+            runCatching {
+                findMethod(owner, "onScrollInteractionEnd", Float::class.javaPrimitiveType!!)
+                    ?.invoke(owner, velocity.toFloat())
+            }
+            invokeVoidNoArg(owner, "resetTouchState")
+            true
+        }
 
         // PagedView.pageEndTransition() invokes this virtual method after mCurrentPage has
         // already been switched. Restore the real coordinates before OplusWorkspace runs its
@@ -253,6 +242,22 @@ class WorkspaceLoop : XposedModule() {
         hookEdgeNavigation(pagedViewClass, workspaceClass, "scrollLeft", wrapToLast = true)
         hookEdgeNavigation(pagedViewClass, workspaceClass, "scrollRight", wrapToLast = false)
 
+        val oplusPagedClass = Class.forName(
+            "com.android.launcher.OplusPagedViewImpl", false, classLoader
+        )
+        val pageWidth = oplusPagedClass.getDeclaredMethod("getPageWidth")
+        hook(pageWidth).setId("workspace-loop-page-width").intercept { chain ->
+            chain.thisObject?.let { activeWraps[it]?.pageWidth } ?: chain.proceed()
+        }
+        val layout = pagedViewClass.getDeclaredMethod(
+            "onLayout", Boolean::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
+        )
+        hook(layout).setId("workspace-loop-layout-cleanup").intercept { chain ->
+            chain.thisObject?.let(::interruptNativeWrap)
+            chain.proceed()
+        }
         moduleLog("hooked OplusWorkspace native wrap animation")
     }
 
@@ -262,16 +267,15 @@ class WorkspaceLoop : XposedModule() {
         start: TouchStart
     ): Int? {
         val pageCount = invokeIntNoArg(owner, "getPageCount") ?: return null
-        if (pageCount <= 1) return null
+        if (pageCount <= 1 || event.pointerCount != 1) return null
 
         val last = validatedLastPage(owner, pageCount)
         if (last <= 0) return null
 
         val dx = event.x - start.x
         val dy = event.y - start.y
-        val density = (owner as? View)?.resources?.displayMetrics?.density ?: 1f
-        val pageSlop = (readField(owner, "mPageSlop") as? Number)?.toFloat() ?: 0f
-        val threshold = max(32f * density, pageSlop)
+        val view = owner as? View ?: return null
+        val threshold = ViewConfiguration.get(view.context).scaledTouchSlop.toFloat()
 
         if (abs(dx) < threshold || abs(dx) <= abs(dy)) return null
 
@@ -347,6 +351,7 @@ class WorkspaceLoop : XposedModule() {
 
         val state = prepareNativeWrap(owner, target, source) ?: return false
 
+        state.settling = true
         val snapped = invokeBooleanOneInt(owner, "snapToPage", target) ?: false
         if (!snapped) {
             activeWraps.remove(owner)
@@ -369,6 +374,9 @@ class WorkspaceLoop : XposedModule() {
         val workspace = owner as? View ?: return null
         val pageCount = invokeIntNoArg(owner, "getPageCount") ?: return null
         val panelCount = max(1, invokeIntNoArg(owner, "getPanelCount") ?: 1)
+        if (panelCount != 1 || readField(owner, "mIsRtl") == true ||
+            invokeBooleanNoArg(owner, "isPageOrderFlipped") == true ||
+            readField(owner, "mFreeScroll") == true) return null
         val currentPage = invokeIntNoArg(owner, "getCurrentPage") ?: return null
         val lastPage = validatedLastPage(owner, pageCount)
         if (lastPage <= 0) return null
@@ -455,8 +463,11 @@ class WorkspaceLoop : XposedModule() {
 
         val state = NativeWrapState(
             source = source,
+            sourcePage = currentPage,
             targetPage = target,
+            realSourceScroll = realCurrentScroll,
             realTargetScroll = realTargetScroll,
+            pageWidth = oneScreen,
             originalMinScroll = originalMin,
             originalMaxScroll = originalMax,
             pageScrolls = pageScrolls,
@@ -491,15 +502,13 @@ class WorkspaceLoop : XposedModule() {
         return null
     }
 
-    private fun hasNativeTransitionStarted(owner: Any, target: Int): Boolean {
-        val nextPage = invokeIntNoArg(owner, "getNextPage")
-        if (nextPage == target) return true
-
-        val inTransition = invokeBooleanNoArg(owner, "isPageInTransition")
-        if (inTransition == true) return true
-
-        val scrollFinished = invokeBooleanNoArg(owner, "isScrollFinished")
-        return scrollFinished == false
+    private fun interruptNativeWrap(owner: Any) {
+        val state = activeWraps.remove(owner) ?: return
+        val page = invokeIntNoArg(owner, "getDestinationPage") ?: state.sourcePage
+        cancelOplusScrollState(owner)
+        invokeVoidOneInt(owner, "setCurrentPageDirectly", page)
+        restoreNativeWrap(owner, state)
+        invokeVoidNoArg(owner, "pageEndTransition")
     }
 
     private fun finishNativeWrap(owner: Any) {
@@ -510,7 +519,15 @@ class WorkspaceLoop : XposedModule() {
         )
     }
 
-    private fun restoreNativeWrap(owner: Any, state: NativeWrapState) {
+    private fun restoreNativeWrap(
+        owner: Any,
+        state: NativeWrapState,
+        scrollX: Int = if (invokeIntNoArg(owner, "getCurrentPage") == state.targetPage) {
+            state.realTargetScroll
+        } else {
+            state.realSourceScroll
+        }
+    ) {
         if (
             state.pageScrolls.size == state.originalPageScrolls.size &&
             readField(owner, "mPageScrolls") === state.pageScrolls
@@ -527,7 +544,20 @@ class WorkspaceLoop : XposedModule() {
 
         val view = owner as? View
         val scrollY = view?.scrollY ?: 0
-        invokeVoidTwoInts(owner, "scrollTo", state.realTargetScroll, scrollY)
+        writeField(owner, "wasInOverscroll", false)
+        writeField(owner, "lastScrollX", scrollX)
+        writeField(owner, "diffScrollX", 0)
+        writeField(owner, "isFirstFrameWhenUp", false)
+        invokeVoidTwoInts(owner, "scrollTo", scrollX, scrollY)
+        if (state.settling) {
+            readField(owner, "mScroller")?.let { scroller ->
+                runCatching {
+                    findMethod(scroller, "startScroll", *Array(5) { Int::class.javaPrimitiveType!! })
+                        ?.invoke(scroller, scrollX, scrollY, 0, 0, 0)
+                }
+                invokeVoidNoArg(scroller, "abortAnimation")
+            }
+        }
         view?.invalidate()
     }
 
@@ -548,10 +578,10 @@ class WorkspaceLoop : XposedModule() {
         writeField(owner, "mScrollMode", -1)
         writeField(owner, "mNextPage", -1)
         writeField(owner, "mIsBeingDragged", false)
-        writeField(owner, "mDiffScrollX", 0)
+        writeField(owner, "diffScrollX", 0)
         writeField(owner, "mLastAmount", 0)
         writeField(owner, "mTempAmount", 0)
-        writeField(owner, "mOverScrollAmount", 0)
+        writeField(owner, "overScrollAmount", 0)
         writeField(owner, "wasInOverscroll", false)
     }
 
@@ -573,6 +603,17 @@ class WorkspaceLoop : XposedModule() {
     private fun invokeBooleanOneInt(owner: Any, name: String, value: Int): Boolean? {
         val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return null
         return runCatching { method.invoke(owner, value) as? Boolean }.getOrNull()
+    }
+
+    private fun invokeBooleanTwoInts(owner: Any, name: String, a: Int, b: Int): Boolean? {
+        val method = findMethod(owner, name, Int::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!) ?: return null
+        return runCatching { method.invoke(owner, a, b) as? Boolean }.getOrNull()
+    }
+
+    private fun invokeVoidOneInt(owner: Any, name: String, value: Int) {
+        val method = findMethod(owner, name, Int::class.javaPrimitiveType!!) ?: return
+        runCatching { method.invoke(owner, value) }
     }
 
     private fun invokeViewOneInt(owner: Any, name: String, value: Int): View? {

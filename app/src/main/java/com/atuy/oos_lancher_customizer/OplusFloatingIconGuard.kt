@@ -74,6 +74,11 @@ class OplusFloatingIconGuard : XposedModule() {
         }
         moduleLog("hooked OplusFloatingIconView#fetchAndFillLocalIcon")
 
+        hookAllNamedMethods(floatingClass, "recycle", "oplus-recycle") { chain ->
+            readField(chain.thisObject, "mClipIconView")?.let(clipIconOverrides::remove)
+            chain.proceed()
+        }
+
         // OplusClipIconView overrides setIcon and calls into the base implementation on
         // this launcher build. Hook both so the final render input is covered even if the
         // implementation changes which level performs the actual drawing.
@@ -120,9 +125,9 @@ class OplusFloatingIconGuard : XposedModule() {
         val itemInfo = args.getOrNull(2)
         val loadResult = args.getOrNull(4)
 
-        rememberClipOverride(chain.thisObject, originalView, itemInfo)
+        // getOplusIconResult is static; its owner is null. The local path arms the clip.
 
-        if (loadResult == null || itemInfo == null || !shouldPatch(itemInfo)) {
+        if (loadResult == null || itemInfo == null || !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) {
             return chain.proceed(args)
         }
 
@@ -135,7 +140,7 @@ class OplusFloatingIconGuard : XposedModule() {
 
         return try {
             val result = chain.proceed(args)
-            val patched = patchLoadResult(loadResult, originalView)
+            val patched = patchLoadResult(loadResult, originalView, itemInfo)
 
             if (pendingCallback != null) {
                 writeField(loadResult, "onIconLoaded", pendingCallback)
@@ -165,10 +170,10 @@ class OplusFloatingIconGuard : XposedModule() {
     private fun afterFetchAndFillLocalIcon(owner: Any?, args: Array<Any?>) {
         val originalView = args.getOrNull(1) as? View ?: return
         val itemInfo = args.getOrNull(2) ?: return
-        if (!shouldPatch(itemInfo)) return
+        if (!ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return
 
         val loadResult = readField(owner, "mIconLoadResult") ?: return
-        if (patchLoadResult(loadResult, originalView)) {
+        if (patchLoadResult(loadResult, originalView, itemInfo)) {
             moduleLog("local result patched pkg=${resolvePackageName(itemInfo)}")
         }
     }
@@ -176,13 +181,13 @@ class OplusFloatingIconGuard : XposedModule() {
     private fun rememberClipOverride(owner: Any?, originalView: View?, itemInfo: Any?) {
         val clipView = readField(owner, "mClipIconView") ?: return
 
-        if (itemInfo == null || !shouldPatch(itemInfo) || originalView == null) {
+        if (itemInfo == null || !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo) || originalView == null) {
             clipIconOverrides.remove(clipView)
             return
         }
 
         val currentIcon = invokeNoArg(originalView, "getIcon") as? Drawable
-        if (currentIcon == null) {
+        if (currentIcon == null || !ThemedIconPolicy.isThemedDrawable(currentIcon)) {
             clipIconOverrides.remove(clipView)
             return
         }
@@ -212,9 +217,11 @@ class OplusFloatingIconGuard : XposedModule() {
         )
     }
 
-    private fun patchLoadResult(loadResult: Any, originalView: View?): Boolean {
+    private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any): Boolean {
+        if (!ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return false
         val view = originalView ?: return false
         val currentIcon = invokeNoArg(view, "getIcon") as? Drawable ?: return false
+        if (!ThemedIconPolicy.isThemedDrawable(currentIcon)) return false
 
         val drawable = cloneDrawable(currentIcon, view.context)
         drawable.bounds = currentIcon.bounds
@@ -240,11 +247,6 @@ class OplusFloatingIconGuard : XposedModule() {
             return
         }
         context.mainExecutor.execute(callback)
-    }
-
-    private fun shouldPatch(itemInfo: Any): Boolean {
-        val pkg = resolvePackageName(itemInfo) ?: return false
-        return pkg.isNotBlank() && pkg != TARGET_PACKAGE
     }
 
     private fun resolvePackageName(itemInfo: Any): String? {

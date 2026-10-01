@@ -44,4 +44,5 @@ dependencies {
     implementation(libs.material)
     implementation(libs.libxposed.service)
     compileOnly(libs.libxposed.api)
+    testImplementation("junit:junit:4.13.2")
 }

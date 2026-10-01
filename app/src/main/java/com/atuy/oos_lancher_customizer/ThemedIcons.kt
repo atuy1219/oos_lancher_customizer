@@ -43,7 +43,6 @@ class ThemedIcons : XposedModule() {
         private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
         private const val PREVIEW_MANAGER_CLASS = "com.android.launcher3.folder.PreviewItemManager"
         private const val FLOATING_ICON_VIEW_CLASS = "com.android.launcher3.views.FloatingIconView"
-        private val ALLOWED_DISPLAYS = setOf(0, 2, 8, 9)
         private const val LOG_EVERY_N_HITS = 30L
     }
 
@@ -129,12 +128,13 @@ class ThemedIcons : XposedModule() {
         val itemInfo = runCatching { view.tag }.getOrNull() ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
 
-        if (!shouldApplyToBubble(view, pkg)) return
+        if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
 
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         args[0] = themed
 
@@ -146,13 +146,14 @@ class ThemedIcons : XposedModule() {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldApplyToPackage(pkg)) return
+        if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeItem(itemInfo)) return
 
         val drawable = readField(previewParams, "drawable") as? Drawable ?: return
         val context = resolveContext(owner) ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         writeField(previewParams, "drawable", themed)
 
@@ -165,12 +166,15 @@ class ThemedIcons : XposedModule() {
         val drawable = args.firstOrNull() as? Drawable ?: return
         val itemInfo = resolveFloatingItemInfo(owner) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldApplyToPackage(pkg)) return
+        val originalView = readField(owner, "mOriginalIcon") as? View
+        if (!shouldApplyToPackage(pkg) ||
+            !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return
 
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         args[0] = themed
 
@@ -202,16 +206,6 @@ class ThemedIcons : XposedModule() {
         }
 
         return null
-    }
-
-    private fun shouldApplyToBubble(view: View, pkg: String): Boolean {
-        if (!shouldApplyToPackage(pkg)) return false
-        val display = safeDisplay(view)
-        if (display != null && !ALLOWED_DISPLAYS.contains(display)) {
-            moduleLog("skip display=$display pkg=$pkg")
-            return false
-        }
-        return true
     }
 
     private fun shouldApplyToPackage(pkg: String): Boolean {
