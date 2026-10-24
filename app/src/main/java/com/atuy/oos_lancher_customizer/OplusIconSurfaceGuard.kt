@@ -211,9 +211,13 @@ class OplusIconSurfaceGuard : XposedModule() {
     private fun wrapNewLoaderCallback(owner: Any?, args: Array<Any?>) {
         if (owner == null) return
         val originalCallback = args.getOrNull(0) ?: return
-        val callbackInterface = originalCallback.javaClass.interfaces.firstOrNull {
-            it.name == "com.android.launcher3.anim.iconsurfacemanager.loader.IconViewCallback"
-        } ?: return
+        val callbackInterface = runCatching {
+            Class.forName(
+                "com.android.launcher3.anim.iconsurfacemanager.loader.IconViewCallback",
+                false, owner.javaClass.classLoader
+            )
+        }.getOrNull() ?: return
+        if (!callbackInterface.isInstance(originalCallback)) return
         val wrapper = Proxy.newProxyInstance(
             callbackInterface.classLoader,
             arrayOf(callbackInterface)
