@@ -29,6 +29,12 @@ class Oos15MonochromeAssetsTest {
             assertTrue(zip.getEntry("xxxhdpi/com.android.contacts/dialer_monochrome.png") != null)
         }
     }
+    @Test fun originalOos15GlyphsAreEnlargedWithoutChangingOtherPackages() {
+        assertEquals(1.12f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
+        assertEquals(1.12f, Oos15MonochromeAssets.glyphScale("com.oneplus.filemanager"), 0f)
+        assertEquals(1.12f, Oos15MonochromeAssets.glyphScale("com.oplus.camera"), 0f)
+        assertEquals(1.08f, Oos15MonochromeAssets.glyphScale("com.oplus.consumerIRApp"), 0f)
+    }
     @Test fun distinguishDialerFromContactsComponent() {
         assertTrue(Oos15MonochromeAssets.isDialerActivityName("com.android.contacts.activities.DialtactsActivity"))
         assertFalse(Oos15MonochromeAssets.isDialerActivityName("com.android.contacts.activities.PeopleActivity"))
