@@ -43,6 +43,8 @@ class ThemedIcons : XposedModule() {
         private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
         private const val PREVIEW_MANAGER_CLASS = "com.android.launcher3.folder.PreviewItemManager"
         private const val FLOATING_ICON_VIEW_CLASS = "com.android.launcher3.views.FloatingIconView"
+        private const val POPUP_CLASS =
+            "com.android.launcher3.popup.PopupContainerWithArrow"
         private const val LOG_EVERY_N_HITS = 30L
     }
 
@@ -102,6 +104,24 @@ class ThemedIcons : XposedModule() {
         }.onFailure {
             moduleLog("FloatingIconView hook skipped: ${it.message}")
         }
+
+        // The long-press menu holds a reference to the original BubbleTextView.
+        // A popup/drag preview rebind can restore its unthemed drawable without a
+        // new BubbleTextView#setIcon call reaching our hook. Reconcile at both
+        // popup presentation and close, after the launcher updates the view.
+        runCatching {
+            val popupClass = Class.forName(POPUP_CLASS, false, classLoader)
+            for (methodName in listOf("populateAndShow", "closeComplete")) {
+                hookAllNamedMethods(popupClass, methodName, "popup-theme-$methodName") { chain ->
+                    val result = chain.proceed()
+                    restoreIconAfterPopup(chain.thisObject, methodName)
+                    result
+                }
+            }
+            moduleLog("hooked PopupContainerWithArrow present/close")
+        }.onFailure {
+            moduleLog("PopupContainerWithArrow hook skipped: ${it.message}")
+        }
     }
 
     private fun hookAllNamedMethods(
@@ -125,10 +145,20 @@ class ThemedIcons : XposedModule() {
     private fun beforeBubbleSetIcon(owner: Any?, args: Array<Any?>) {
         val view = owner as? View ?: return
         val drawable = args.firstOrNull() as? Drawable ?: return
-        val itemInfo = runCatching { view.tag }.getOrNull() ?: return
+        val itemInfo = ThemedIconPolicy.itemForView(view)
+            ?: readField(view, "mInfo")
+            ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
 
         if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
+
+        // Already themed drawables can be restored from a saved ConstantState.
+        // Do not run them back through MonochromeIconFactory, which destroys
+        // their shapes and may change icon scale on popup dismissal.
+        if (ThemedIconPolicy.isThemedDrawable(drawable)) {
+            ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
+            return
+        }
 
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
@@ -140,6 +170,57 @@ class ThemedIcons : XposedModule() {
 
         val id = seq.incrementAndGet()
         moduleLog("[$id] setIcon themed pkg=$pkg view=${view.javaClass.simpleName} display=${safeDisplay(view)}")
+    }
+
+    private fun restoreIconAfterPopup(owner: Any?, stage: String) {
+        val iconView = readField(owner, "mOriginalIcon") as? View ?: return
+        iconView.post {
+            val item = ThemedIconPolicy.itemForView(iconView)
+                ?: readField(iconView, "mInfo")
+                ?: return@post
+            if (!ThemedIconPolicy.shouldThemeView(iconView, item)) return@post
+            val state = ThemedIconPolicy.themedStateFor(item) ?: run {
+                moduleLog("popup $stage: no themed snapshot for item=" +
+                    ThemedIconPolicy.itemKey(item))
+                return@post
+            }
+
+            val displayedIcon = invokeNoArg(iconView, "getIcon") as? Drawable
+            val compound = invokeNoArg(iconView, "getCompoundDrawable") as? Drawable
+            if (displayedIcon != null &&
+                ThemedIconPolicy.isThemedDrawable(displayedIcon) &&
+                (compound == null || ThemedIconPolicy.isThemedDrawable(compound))) {
+                return@post
+            }
+
+            val restored = state.newDrawable(iconView.resources).mutate()
+            if (displayedIcon != null) restored.bounds = displayedIcon.bounds
+            ThemedIconPolicy.rememberDrawable(restored, item)
+            runCatching {
+                val method = findOneArgMethod(iconView, "setIcon", Drawable::class.java)
+                    ?: error("BubbleTextView#setIcon(Drawable) unavailable")
+                method.invoke(iconView, restored)
+            }.onSuccess {
+                moduleLog("popup $stage restored theme item=" + ThemedIconPolicy.itemKey(item))
+            }.onFailure {
+                moduleLog("popup $stage restore failed: ${it.message}", it)
+            }
+        }
+    }
+
+    private fun findOneArgMethod(owner: Any, name: String, type: Class<*>): Method? {
+        var cls: Class<*>? = owner.javaClass
+        while (cls != null) {
+            val method = cls.declaredMethods.firstOrNull {
+                it.name == name && it.parameterTypes.contentEquals(arrayOf(type))
+            }
+            if (method != null) {
+                method.isAccessible = true
+                return method
+            }
+            cls = cls.superclass
+        }
+        return null
     }
 
     private fun afterPreviewSetDrawable(owner: Any?, args: Array<Any?>) {
