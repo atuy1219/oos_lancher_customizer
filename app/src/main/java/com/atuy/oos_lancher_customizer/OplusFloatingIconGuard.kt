@@ -129,13 +129,8 @@ class OplusFloatingIconGuard : XposedModule() {
 
         if (loadResult == null || itemInfo == null ||
             !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) {
-            moduleLog("floating result skip view=${originalView?.javaClass?.simpleName} " +
-                "info=${itemInfo?.javaClass?.simpleName} " +
-                "container=${itemInfo?.let { readField(it, "container") }}")
             return chain.proceed(args)
         }
-        moduleLog("floating result eligible view=${originalView?.javaClass?.simpleName} " +
-            "item=${ThemedIconPolicy.itemKey(itemInfo)}")
 
         // If checkIconResult() has already registered its callback, prevent Oplus from
         // scheduling it with the intermediate reconstructed drawable.
