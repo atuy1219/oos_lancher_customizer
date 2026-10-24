@@ -127,9 +127,15 @@ class OplusFloatingIconGuard : XposedModule() {
 
         // getOplusIconResult is static; its owner is null. The local path arms the clip.
 
-        if (loadResult == null || itemInfo == null || !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) {
+        if (loadResult == null || itemInfo == null ||
+            !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) {
+            moduleLog("floating result skip view=${originalView?.javaClass?.simpleName} " +
+                "info=${itemInfo?.javaClass?.simpleName} " +
+                "container=${itemInfo?.let { readField(it, "container") }}")
             return chain.proceed(args)
         }
+        moduleLog("floating result eligible view=${originalView?.javaClass?.simpleName} " +
+            "item=${ThemedIconPolicy.itemKey(itemInfo)}")
 
         // If checkIconResult() has already registered its callback, prevent Oplus from
         // scheduling it with the intermediate reconstructed drawable.
@@ -172,6 +178,9 @@ class OplusFloatingIconGuard : XposedModule() {
         val itemInfo = args.getOrNull(2) ?: return
         if (!ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
 
+        // The clip view may be created by fetchAndFillLocalIcon itself, so arming
+        // only in the before-hook can miss the drawable's final rendering sink.
+        rememberClipOverride(owner, originalView, itemInfo)
         val loadResult = readField(owner, "mIconLoadResult") ?: return
         if (patchLoadResult(loadResult, originalView, itemInfo)) {
             moduleLog("local result patched pkg=${resolvePackageName(itemInfo)}")
@@ -189,6 +198,8 @@ class OplusFloatingIconGuard : XposedModule() {
         val currentIcon = themedIconForTarget(originalView, itemInfo)
         if (currentIcon == null) {
             clipIconOverrides.remove(clipView)
+            moduleLog("floating clip snapshot MISS view=${originalView.javaClass.simpleName} " +
+                "item=${ThemedIconPolicy.itemKey(itemInfo)}")
             return
         }
 
