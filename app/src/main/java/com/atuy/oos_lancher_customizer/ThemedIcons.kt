@@ -80,6 +80,17 @@ class ThemedIcons : XposedModule() {
         }
         moduleLog("hooked BubbleTextView#setIcon")
 
+        // Direct CompoundDrawable updates bypass setIcon (e.g. pressed-state /
+        // long-press popup rebinds). Preserve the exact themed snapshot there too.
+        hookAllNamedMethods(
+            bubbleTextViewClass, "applyCompoundDrawables", "bubble-compound"
+        ) { chain ->
+            val args = chain.args.toTypedArray()
+            beforeBubbleApplyCompound(chain.thisObject, args)
+            chain.proceed(args)
+        }
+        moduleLog("hooked BubbleTextView#applyCompoundDrawables")
+
         runCatching {
             val previewManagerClass = Class.forName(PREVIEW_MANAGER_CLASS, false, classLoader)
             hookAllNamedMethods(previewManagerClass, "setDrawable", "folder-setDrawable") { chain ->
@@ -170,6 +181,22 @@ class ThemedIcons : XposedModule() {
 
         val id = seq.incrementAndGet()
         moduleLog("[$id] setIcon themed pkg=$pkg view=${view.javaClass.simpleName} display=${safeDisplay(view)}")
+    }
+
+    private fun beforeBubbleApplyCompound(owner: Any?, args: Array<Any?>) {
+        val view = owner as? View ?: return
+        val original = args.firstOrNull() as? Drawable ?: return
+        if (ThemedIconPolicy.isThemedDrawable(original)) return
+        val item = ThemedIconPolicy.itemForView(view)
+            ?: readField(view, "mInfo")
+            ?: return
+        if (!ThemedIconPolicy.shouldThemeView(view, item)) return
+        val state = ThemedIconPolicy.themedStateFor(item) ?: return
+        val restored = state.newDrawable(view.resources).mutate()
+        restored.bounds = original.bounds
+        ThemedIconPolicy.rememberDrawable(restored, item)
+        args[0] = restored
+        moduleLog("compound theme restored item=" + ThemedIconPolicy.itemKey(item))
     }
 
     private fun restoreIconAfterPopup(owner: Any?, stage: String) {
