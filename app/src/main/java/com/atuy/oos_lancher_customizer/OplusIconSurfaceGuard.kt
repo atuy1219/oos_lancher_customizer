@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.util.Log
-import android.util.LruCache
 import android.view.View
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -54,10 +53,13 @@ class OplusIconSurfaceGuard : XposedModule() {
     @Volatile
     private var hooksInstalled = false
 
-    private val themedStates = object : LruCache<String, Drawable.ConstantState>(256) {}
-
-    // A folder-close animation may target BigFolderItemIcon while ItemInfo identifies the app.
-    private data class TargetOverride(val key: String, val state: Drawable.ConstantState)
+    // A folder-close animation can target FlexibleFolderIcon whose own tag is FolderInfo
+    // while the drawable belongs to a WorkspaceItemInfo inside that folder.
+    private data class TargetOverride(
+        val key: String,
+        val state: Drawable.ConstantState,
+        val item: Any
+    )
 
     private val targetOverrides =
         Collections.synchronizedMap(WeakHashMap<View, TargetOverride>())
@@ -194,13 +196,13 @@ class OplusIconSurfaceGuard : XposedModule() {
         if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, item)) return
 
         val key = ThemedIconPolicy.itemKey(item)
-        var state = themedStates.get(key)
+        var state = ThemedIconPolicy.themedStateFor(item)
         if (state == null) {
             // The display icon may have been captured under the original view ItemInfo
             // rather than the cloned ItemInfo passed to IconDrawableLoader.
             val viewItem = ThemedIconPolicy.itemForView(view)
             if (viewItem != null && ThemedIconPolicy.shouldThemeAnimation(view, viewItem)) {
-                state = themedStates.get(ThemedIconPolicy.itemKey(viewItem))
+                state = ThemedIconPolicy.themedStateFor(viewItem)
             }
         }
         val validState = state ?: return
@@ -289,8 +291,8 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     private fun rememberExactThemed(itemInfo: Any, drawable: BitmapDrawable, source: String) {
         if (!ThemedIconPolicy.isThemedDrawable(drawable)) return
-        val state = drawable.constantState ?: return
-        themedStates.put(ThemedIconPolicy.itemKey(itemInfo), state)
+        if (drawable.constantState == null) return
+        ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
         moduleLog(
             "exact themed cached item=${ThemedIconPolicy.itemKey(itemInfo)} source=$source " +
                 "${drawable.javaClass.simpleName} ${drawable.intrinsicWidth}x${drawable.intrinsicHeight}"
@@ -304,10 +306,22 @@ class OplusIconSurfaceGuard : XposedModule() {
         val view = args.getOrNull(1) as? View ?: return
         targetOverrides.remove(view)
         val itemInfo = args.getOrNull(2) ?: return
-        if (!ThemedIconPolicy.shouldThemeAnimation(view, itemInfo)) return
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, itemInfo)) {
+            if (view.javaClass.name.contains("FolderIcon")) {
+                moduleLog("v16 folder surface rejected: view=${view.javaClass.simpleName} " +
+                    "item=${itemInfo.javaClass.simpleName}")
+            }
+            return
+        }
         val key = ThemedIconPolicy.itemKey(itemInfo)
-        val state = themedStates.get(key) ?: return
-        targetOverrides[view] = TargetOverride(key, state)
+        val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: run {
+            if (view.javaClass.name.contains("FolderIcon")) {
+                moduleLog("v16 folder themed snapshot missing item=$key")
+            }
+            return
+        }
+        targetOverrides[view] = TargetOverride(key, state, itemInfo)
+        moduleLog("v16 themed target armed view=${view.javaClass.simpleName} item=$key")
     }
 
     private fun replaceDrawableArgumentFromItemInfo(args: Array<Any?>) {
@@ -317,9 +331,9 @@ class OplusIconSurfaceGuard : XposedModule() {
         val itemInfo = args.getOrNull(2) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
         if (!shouldPatch(pkg) ||
-            !ThemedIconPolicy.shouldThemeAnimation(args.getOrNull(1) as? View, itemInfo)) return
+            !ThemedIconPolicy.shouldThemeSurfaceTarget(args.getOrNull(1) as? View, itemInfo)) return
 
-        val state = themedStates.get(ThemedIconPolicy.itemKey(itemInfo)) ?: return
+        val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: return
         val drawableIndex = args.indexOfFirst { it is Drawable }
         if (drawableIndex < 0) return
 
@@ -335,18 +349,21 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     private fun replacementForView(view: View?): Drawable? {
         if (view == null) return null
-        val itemInfo = ThemedIconPolicy.itemForView(view) ?: return null
-        if (!ThemedIconPolicy.shouldThemeAnimation(view, itemInfo)) {
+
+        // Check the identity of the *app being animated* before falling back to
+        // the view's tag. For a closed folder, view.tag is FolderInfo, not the app.
+        val target = targetOverrides[view]
+        if (target != null) {
+            if (target.key == ThemedIconPolicy.itemKey(target.item) &&
+                ThemedIconPolicy.shouldThemeSurfaceTarget(view, target.item)) {
+                return newDrawable(target.state, view.context)
+            }
             targetOverrides.remove(view)
-            return null
         }
-        val key = ThemedIconPolicy.itemKey(itemInfo)
-        val override = targetOverrides[view]
-        if (override != null && override.key == key) {
-            return newDrawable(override.state, view.context)
-        }
-        targetOverrides.remove(view)
-        val state = themedStates.get(key) ?: return null
+
+        val item = ThemedIconPolicy.itemForView(view) ?: return null
+        if (!ThemedIconPolicy.shouldThemeAnimation(view, item)) return null
+        val state = ThemedIconPolicy.themedStateFor(item) ?: return null
         return newDrawable(state, view.context)
     }
 
