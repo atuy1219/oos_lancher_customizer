@@ -22,13 +22,11 @@ internal object Oos15MonochromeAssets {
     private const val DIALER_GLYPH = "dialer_monochrome.png"
 
     /**
-     * Enlarge the original OOS15 glyph inside the unchanged 192px theme circle.
-     * Most OEM PNGs leave generous transparent space around their content.
-     * The IR remote artwork approaches the bottom edge of its PNG, so use
-     * a smaller zoom for that one package to keep its shape intact.
+     * Apply the same 1.5x foreground canvas scale to every bundled OOS15
+     * monochrome image; leave background circle and fallback paths unchanged.
+     * PNG artwork that approaches an edge may clip at the circular mask.
      */
-    internal fun glyphScale(packageName: String): Float =
-        if (packageName == "com.oplus.consumerIRApp") 1.08f else 1.12f
+    internal fun glyphScale(packageName: String): Float = 1.50f
 
     @Volatile private var bytesByPackage: Map<String, ByteArray>? = null
     private val decoded = object : LruCache<String, Bitmap>(8 * 1024) {
