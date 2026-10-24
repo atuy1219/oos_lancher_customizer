@@ -56,14 +56,14 @@ class ThemedIconPolicyTest {
     }
 
     @Test fun onlyWorkspaceHotseatAndFolderItemsAreThemeable() {
-        for (container in listOf(-100, -101, 42)) {
+        for (container in listOf(-100, -101, -103, 42)) {
             assertTrue("container=$container", ThemedIconPolicy.shouldThemeItem(
                 Item(container = container)
             ))
         }
         for (container in listOf(
             -1, -104, -105, -106, -107, -110, -111, -112, -113,
-            -201, -225, -102, -103
+            -201, -225, -102
         )) {
             assertFalse("container=$container", ThemedIconPolicy.shouldThemeItem(
                 Item(container = container)
@@ -85,6 +85,32 @@ class ThemedIconPolicyTest {
         for (display in listOf(null, -1, 1, 5, 6, 7, 8, 9, 11, 12, 13)) {
             assertFalse("display=$display", ThemedIconPolicy.isHomeDisplay(display))
         }
+    }
+
+    @Test fun physicalDockAndPredictedHotseatIconsCanBeThemed() {
+        for (container in listOf(-101, -103)) {
+            assertTrue(ThemedIconPolicy.isHotseatContainer(container))
+            for (display in listOf(0, 8, 9)) {
+                assertTrue("container=$container display=$display",
+                    ThemedIconPolicy.isEligibleDisplay(display, container, true))
+            }
+        }
+        assertTrue(ThemedIconPolicy.isEligibleDisplay(0, -101, false))
+        assertFalse(ThemedIconPolicy.isEligibleDisplay(8, -101, false))
+        assertFalse(ThemedIconPolicy.isEligibleDisplay(0, -103, false))
+        assertFalse(ThemedIconPolicy.isEligibleDisplay(null, -101, true))
+    }
+
+    @Test fun drawerPredictionAndCategoryRemainExcludedEvenInsideLauncher() {
+        for (container in listOf(-102, -104, -201, -225)) {
+            assertFalse(ThemedIconPolicy.isHotseatContainer(container))
+            for (display in listOf(0, 1, 8, 9, 11, 13)) {
+                assertFalse("container=$container display=$display",
+                    ThemedIconPolicy.isEligibleDisplay(display, container, true) &&
+                        ThemedIconPolicy.shouldThemeItem(Item(container = container)))
+            }
+        }
+        assertFalse(ThemedIconPolicy.isEligibleDisplay(8, -100, true))
     }
 
     @Test fun nonHomeSurfaceAncestryIsExcludedWithoutBlockingTheWorkspace() {
