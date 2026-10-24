@@ -40,6 +40,21 @@ class ThemedIconPolicyTest {
         assertFalse(ThemedIconPolicy.shouldThemeItem(null))
     }
 
+    @Test fun stableKeyDoesNotDependOnMutableLaunchIntent() {
+        // A folder item is loaded as WorkspaceItemInfo before launching the app.
+        // ColorOS appends sourceBounds, anim_from_item_click and pre-start extras
+        // to its Intent on launch; none of them are part of this identity.
+        val beforeLaunch = ThemedIconPolicy.itemKey(Item(id = 223, container = 42))
+        val atAnimation = ThemedIconPolicy.itemKey(Item(id = 223, container = 42))
+        assertEquals(beforeLaunch, atAnimation)
+        assertEquals(
+            ThemedIconPolicy.stableItemKey(223L, "personal", 0, null, null),
+            atAnimation
+        )
+        assertNotEquals(atAnimation, ThemedIconPolicy.itemKey(Item(id = 224, container = 42)))
+        assertNotEquals(atAnimation, ThemedIconPolicy.itemKey(Item(id = 223, user = "work", container = 42)))
+    }
+
     @Test fun normalAppAndShortcutsNeverShareAnAnimationCacheKey() {
         val app = ThemedIconPolicy.itemKey(Item())
         val shortcut = ThemedIconPolicy.itemKey(Item(itemType = 6, shortcut = "chat"))
