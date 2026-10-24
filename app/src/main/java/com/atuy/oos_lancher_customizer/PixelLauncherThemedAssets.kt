@@ -27,6 +27,18 @@ internal object PixelLauncherThemedAssets {
     private const val TAG = "Pixel_ThemedIcons"
     private const val SIZE = 192
 
+    /**
+     * Pixel and Oplus IconProvider theme fallback use InsetDrawable(d, .2f)
+     * before attaching the vector as AdaptiveIconDrawable monochrome.
+     * The additional adaptive foreground inset is compensated when drawn
+     * by AdaptiveIconDrawable, leaving a net 60% vector canvas.
+     *
+     * This constant affects ONLY Pixel-exclusive vectors. The original OOS15
+     * foreground scale remains 1.5f.
+     */
+    internal const val GLYPH_INSET_FRACTION = 0.20f
+    internal const val GLYPH_SCALE = 1f - 2f * GLYPH_INSET_FRACTION
+
     private val icons: Map<String, String> = mapOf(
         "com.google.android.apps.classroom" to "classroom",
         "com.google.android.apps.translate" to "g_translate",
