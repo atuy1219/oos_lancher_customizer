@@ -191,23 +191,7 @@ class ThemedIcons : XposedModule() {
             moduleLog("FloatingIconView hook skipped: ${it.message}")
         }
 
-        // The long-press menu holds a reference to the original BubbleTextView.
-        // A popup/drag preview rebind can restore its unthemed drawable without a
-        // new BubbleTextView#setIcon call reaching our hook. Reconcile at both
-        // popup presentation and close, after the launcher updates the view.
-        runCatching {
-            val popupClass = Class.forName(POPUP_CLASS, false, classLoader)
-            for (methodName in listOf("populateAndShow", "closeComplete")) {
-                hookAllNamedMethods(popupClass, methodName, "popup-theme-$methodName") { chain ->
-                    val result = chain.proceed()
-                    restoreIconAfterPopup(chain.thisObject, methodName)
-                    result
-                }
-            }
-            moduleLog("hooked PopupContainerWithArrow present/close")
-        }.onFailure {
-            moduleLog("PopupContainerWithArrow hook skipped: ${it.message}")
-        }
+
     }
 
     private fun hookAllNamedMethods(
