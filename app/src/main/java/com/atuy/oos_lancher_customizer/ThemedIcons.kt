@@ -146,7 +146,7 @@ class ThemedIcons : XposedModule() {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeItem(itemInfo)) return
+        if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val drawable = readField(previewParams, "drawable") as? Drawable ?: return
         val context = resolveContext(owner) ?: return
