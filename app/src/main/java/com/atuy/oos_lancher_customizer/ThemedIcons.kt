@@ -42,6 +42,10 @@ class ThemedIcons : XposedModule() {
         private const val TARGET_PACKAGE = "com.android.launcher"
         private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
         private const val PREVIEW_MANAGER_CLASS = "com.android.launcher3.folder.PreviewItemManager"
+        private const val BIG_PREVIEW_MANAGER_CLASS =
+            "com.android.launcher3.folder.big.BigFolderPreviewItemManager"
+        private const val BIG_FOLDER_ITEM_CLASS =
+            "com.android.launcher3.folder.big.BigFolderItemIcon"
         private const val FLOATING_ICON_VIEW_CLASS = "com.android.launcher3.views.FloatingIconView"
         private const val POPUP_CLASS =
             "com.android.launcher3.popup.PopupContainerWithArrow"
@@ -102,6 +106,50 @@ class ThemedIcons : XposedModule() {
             moduleLog("hooked PreviewItemManager#setDrawable")
         }.onFailure {
             moduleLog("PreviewItemManager hook skipped: ${it.message}")
+        }
+
+        // BigFolderItemIcon is a plain View rather than BubbleTextView. Its
+        // Drawable cannot be captured by the ordinary setIcon/preview hooks.
+        // Register the exact ColorOS 16.6.20 image paths, including the preview
+        // manager override that does not have to call super#setDrawable.
+        runCatching {
+            val bigManager = Class.forName(BIG_PREVIEW_MANAGER_CLASS, false, classLoader)
+            hookAllNamedMethods(bigManager, "setDrawable", "big-preview-setDrawable") { chain ->
+                val args = chain.args.toTypedArray()
+                val result = chain.proceed(args)
+                afterPreviewSetDrawable(chain.thisObject, args)
+                result
+            }
+            moduleLog("hooked BigFolderPreviewItemManager#setDrawable")
+        }.onFailure {
+            moduleLog("big preview hook skipped: ${it.message}", it)
+        }
+
+        runCatching {
+            val iconClass = Class.forName(BIG_FOLDER_ITEM_CLASS, false, classLoader)
+            hookAllNamedMethods(iconClass, "setDrawable", "big-item-setDrawable") { chain ->
+                val args = chain.args.toTypedArray()
+                beforeBigFolderSetDrawable(chain.thisObject, args)
+                chain.proceed(args)
+            }
+            for (methodName in listOf("getDrawable", "getDrawableByIndex")) {
+                hookAllNamedMethods(iconClass, methodName, "big-item-$methodName") { chain ->
+                    val result = chain.proceed()
+                    themedBigFolderDrawable(chain.thisObject, result as? Drawable) ?: result
+                }
+            }
+            // setItemInfo/setParentFolderIcon may be called after setDrawable.
+            // Reconcile the stored field once both bindings become available.
+            for (methodName in listOf("setItemInfo", "setParentFolderIcon")) {
+                hookAllNamedMethods(iconClass, methodName, "big-item-$methodName") { chain ->
+                    val result = chain.proceed()
+                    reconcileBigFolderItem(chain.thisObject)
+                    result
+                }
+            }
+            moduleLog("hooked BigFolderItemIcon drawable/binding paths")
+        }.onFailure {
+            moduleLog("BigFolderItemIcon hooks skipped: ${it.message}", it)
         }
 
         runCatching {
@@ -250,6 +298,58 @@ class ThemedIcons : XposedModule() {
         return null
     }
 
+    private fun beforeBigFolderSetDrawable(owner: Any?, args: Array<Any?>) {
+        val original = args.firstOrNull() as? Drawable ?: return
+        val themed = themedBigFolderDrawable(owner, original) ?: return
+        args[0] = themed
+    }
+
+    private fun reconcileBigFolderItem(owner: Any?) {
+        val view = owner as? View ?: return
+        val original = readField(view, "drawable") as? Drawable ?: return
+        val themed = themedBigFolderDrawable(view, original) ?: return
+        if (themed !== original) {
+            writeField(view, "drawable", themed)
+            view.invalidate()
+        }
+    }
+
+    private fun themedBigFolderDrawable(owner: Any?, original: Drawable?): Drawable? {
+        val view = owner as? View ?: return null
+        val source = original ?: return null
+        val info = ThemedIconPolicy.itemForView(view) ?: return null
+        if (!ThemedIconPolicy.shouldThemeView(view, info)) return null
+        val pkg = resolvePackageName(info) ?: return null
+        if (!shouldApplyToPackage(pkg)) return null
+
+        if (ThemedIconPolicy.isThemedDrawable(source)) {
+            ThemedIconPolicy.rememberDrawable(source, info)
+            return source
+        }
+
+        // A BigFolderItemIcon getter can be called during animations. Prefer
+        // the exact themed snapshot already recorded for the item rather than
+        // applying the monochrome filter twice or loading the package again.
+        val existing = ThemedIconPolicy.themedStateFor(info)
+        if (existing != null) {
+            val restored = existing.newDrawable(view.resources).mutate()
+            restored.bounds = source.bounds
+            ThemedIconPolicy.rememberDrawable(restored, info)
+            return restored
+        }
+
+        val context = view.context.applicationContext ?: view.context
+        val isShortcut = isShortcutLikeItem(info)
+        val originalSource = resolveBestSourceDrawable(context, info, source)
+        val themed = themedDrawable(context, pkg, originalSource, isShortcut) ?: return null
+        themed.bounds = source.bounds
+        ThemedIconPolicy.rememberDrawable(themed, info)
+        moduleLog("BigFolderItemIcon snapshot CREATED item=" +
+            ThemedIconPolicy.itemKey(info) + " drawable=" +
+            source.javaClass.simpleName)
+        return themed
+    }
+
     private fun afterPreviewSetDrawable(owner: Any?, args: Array<Any?>) {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
@@ -257,6 +357,10 @@ class ThemedIcons : XposedModule() {
         if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val drawable = readField(previewParams, "drawable") as? Drawable ?: return
+        if (ThemedIconPolicy.isThemedDrawable(drawable)) {
+            ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
+            return
+        }
         val context = resolveContext(owner) ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
