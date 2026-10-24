@@ -71,6 +71,8 @@ class ThemedIcons : XposedModule() {
         Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
     private val restoringDraw =
         Collections.synchronizedMap(WeakHashMap<View, Boolean>())
+    private val pendingPopupFinish =
+        Collections.synchronizedMap(WeakHashMap<View, Boolean>())
     @Volatile
     private var hooksInstalled = false
 
@@ -280,21 +282,33 @@ class ThemedIcons : XposedModule() {
         if (!ThemedIconPolicy.shouldThemeView(view, item)) return
         val displayed = readField(view, "mIcon") as? Drawable
         val compound = invokeNoArg(view, "getCompoundDrawable") as? Drawable
-        if (displayed != null && ThemedIconPolicy.isThemedDrawable(displayed) &&
+        val force = pendingPopupFinish.remove(view) == true
+        if (!force && displayed != null && ThemedIconPolicy.isThemedDrawable(displayed) &&
             (compound == null || ThemedIconPolicy.isThemedDrawable(compound))) return
 
         val state = ThemedIconPolicy.themedStateFor(item) ?: return
         restoringDraw[view] = true
         try {
-            val restored = state.newDrawable(view.resources).mutate()
-            restored.alpha = 255
+            val restored = state.newDrawable(view.resources).mutate().apply {
+                alpha = 255
+                clearColorFilter()
+            }
             restored.bounds = displayed?.bounds ?: compound?.bounds ?: restored.bounds
             ThemedIconPolicy.rememberDrawable(restored, item)
-            val method = findOneArgMethod(view, "setIcon", Drawable::class.java) ?: return
-            method.invoke(view, restored)
+            // Let the launcher update its own layout, then repair the actual
+            // compound drawable if the OEM extension intercepted setIcon.
+            findOneArgMethod(view, "setIcon", Drawable::class.java)?.invoke(view, restored)
+            val nowIcon = readField(view, "mIcon") as? Drawable
+            val nowCompound = invokeNoArg(view, "getCompoundDrawable") as? Drawable
+            if (nowIcon == null || !ThemedIconPolicy.isThemedDrawable(nowIcon) ||
+                nowCompound == null || !ThemedIconPolicy.isThemedDrawable(nowCompound)) {
+                writeField(view, "mIcon", restored)
+                findOneArgMethod(view, "applyCompoundDrawables", Drawable::class.java)
+                    ?.invoke(view, restored)
+            }
             moduleLog(
-                "drawIcon restored after popup item=" + ThemedIconPolicy.itemKey(item) +
-                    " mIcon=" + displayed?.javaClass?.simpleName +
+                "drawIcon restored force=$force item=" + ThemedIconPolicy.itemKey(item) +
+                    " before=" + displayed?.javaClass?.simpleName +
                     " compound=" + compound?.javaClass?.simpleName
             )
         } catch (error: Throwable) {
@@ -305,7 +319,20 @@ class ThemedIcons : XposedModule() {
     }
 
     private fun restoreIconAfterPopup(owner: Any?, stage: String) {
-        val iconView = readField(owner, "mOriginalIcon") as? View ?: return
+        val iconView = (readField(owner, "mOriginalIcon")
+            ?: owner?.let { invokeNoArg(it, "getOriginalIcon") }) as? View ?: return
+        if (stage == "closeComplete") {
+            // OEM popup animations may mutate an already-themed Drawable in
+            // place (alpha/colorFilter). Restoring only when the Drawable
+            // instance changes misses that case. Force a clean snapshot at the
+            // next render frame and invalidate to ensure drawIcon runs.
+            pendingPopupFinish[iconView] = true
+            iconView.postOnAnimation {
+                restoreBeforeBubbleDraw(iconView)
+                iconView.invalidate()
+            }
+            return
+        }
         iconView.post {
             val item = ThemedIconPolicy.itemForView(iconView)
                 ?: readField(iconView, "mInfo")
@@ -327,6 +354,7 @@ class ThemedIcons : XposedModule() {
 
             val restored = state.newDrawable(iconView.resources).mutate()
             restored.alpha = 255
+            restored.clearColorFilter()
             if (displayedIcon != null) restored.bounds = displayedIcon.bounds
             ThemedIconPolicy.rememberDrawable(restored, item)
             runCatching {
