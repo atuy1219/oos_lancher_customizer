@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
-  group: nightly
+  group: nightly-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -85,7 +88,7 @@ jobs:
         shell: bash
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon clean assembleDebug
+          ./gradlew --no-daemon clean testDebugUnitTest assembleDebug lintDebug
           cp app/build/outputs/apk/debug/app-debug.apk oos-launcher-customizer-nightly.apk
 
       - name: Upload workflow artifact
