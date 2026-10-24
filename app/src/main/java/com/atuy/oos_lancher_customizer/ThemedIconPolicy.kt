@@ -28,9 +28,28 @@ internal object ThemedIconPolicy {
 
     private val themedDrawables = Collections.synchronizedMap(WeakHashMap<Drawable, Boolean>())
 
-    fun rememberDrawable(drawable: Drawable) {
+    // Shared between ThemedIcons, FloatingIconGuard and IconSurfaceGuard.
+    // Key by the complete launcher item identity, never the package name alone.
+    // Bounded to avoid keeping an entire app drawer worth of BitmapDrawable states.
+    private val themedStates = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Drawable.ConstantState>(128, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<String, Drawable.ConstantState>?
+            ): Boolean = size > 128
+        }
+    )
+
+    fun rememberDrawable(drawable: Drawable, item: Any? = null) {
         themedDrawables[drawable] = true
+        if (item != null && shouldThemeItem(item)) {
+            drawable.constantState?.let { state ->
+                synchronized(themedStates) { themedStates[itemKey(item)] = state }
+            }
+        }
     }
+
+    fun themedStateFor(item: Any): Drawable.ConstantState? =
+        synchronized(themedStates) { themedStates[itemKey(item)] }
 
     fun isThemedDrawable(drawable: Drawable): Boolean = themedDrawables[drawable] == true
 
@@ -150,6 +169,30 @@ internal object ThemedIconPolicy {
         if (!shouldThemeView(view, item)) return false
         val target = itemForView(view!!) ?: return false
         return shouldThemeItem(target) && itemKey(target) == itemKey(item!!)
+    }
+
+    /**
+     * New IconDrawableLoader uses a FolderIcon as the clicked view when returning an
+     * app to the folder preview. The view's tag is the FolderInfo, not the app ItemInfo.
+     * Accept that indirection only when the folder's database ID equals the app's
+     * positive container ID and the folder itself belongs to the home workspace.
+     */
+    internal fun isMatchingHomeFolder(
+        itemContainer: Long?, folderId: Long?, folderContainer: Int?
+    ): Boolean =
+        itemContainer != null && itemContainer > 0L && itemContainer == folderId &&
+            isHomeContainer(folderContainer)
+
+    fun shouldThemeSurfaceTarget(view: View?, item: Any?): Boolean {
+        if (shouldThemeAnimation(view, item)) return true
+        if (view == null || !shouldThemeItem(item)) return false
+        if (hasExcludedAncestor(view)) return false
+        if (!view.javaClass.name.contains("FolderIcon")) return false
+        val childContainer = (read(item!!, "container") as? Number)?.toLong() ?: return false
+        val folderInfo = call(view, "getInfo") ?: read(view, "mInfo") ?: view.tag ?: return false
+        val folderId = (read(folderInfo, "id") as? Number)?.toLong()
+        val parentContainer = (read(folderInfo, "container") as? Number)?.toInt()
+        return isMatchingHomeFolder(childContainer, folderId, parentContainer)
     }
 
     // Package names alone collide between activities, profiles and deep shortcuts.

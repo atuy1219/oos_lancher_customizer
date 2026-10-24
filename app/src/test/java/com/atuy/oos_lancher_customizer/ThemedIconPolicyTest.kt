@@ -101,6 +101,16 @@ class ThemedIconPolicyTest {
         assertFalse(ThemedIconPolicy.isEligibleDisplay(null, -101, true))
     }
 
+    @Test fun folderReturnAnimationMustMatchHomeFolderId() {
+        assertTrue(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -100))
+        assertTrue(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -101))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, 8, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(-201, -201, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -201))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, null, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(null, 7, -100))
+    }
+
     @Test fun drawerPredictionAndCategoryRemainExcludedEvenInsideLauncher() {
         for (container in listOf(-102, -104, -201, -225)) {
             assertFalse(ThemedIconPolicy.isHotseatContainer(container))
