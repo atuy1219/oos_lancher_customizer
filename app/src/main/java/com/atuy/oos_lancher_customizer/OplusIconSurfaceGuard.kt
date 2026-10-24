@@ -53,8 +53,10 @@ class OplusIconSurfaceGuard : XposedModule() {
     private val themedStates = object : LruCache<String, Drawable.ConstantState>(256) {}
 
     // A folder-close animation may target BigFolderItemIcon while ItemInfo identifies the app.
+    private data class TargetOverride(val key: String, val state: Drawable.ConstantState)
+
     private val targetOverrides =
-        Collections.synchronizedMap(WeakHashMap<View, Drawable.ConstantState>())
+        Collections.synchronizedMap(WeakHashMap<View, TargetOverride>())
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
@@ -118,35 +120,6 @@ class OplusIconSurfaceGuard : XposedModule() {
             chain.proceed(args)
         }
 
-        hookAllNamedMethods(
-            managerClass,
-            "getFancyIconBitmapDrawable",
-            "surface-fancy-result"
-        ) { chain ->
-            val args = chain.args.toTypedArray()
-            val original = chain.proceed(args)
-            replacementForItemInfo(args.getOrNull(1), args.getOrNull(0) as? Context)
-                ?: original
-        }
-
-        hookAllNamedMethods(
-            managerClass,
-            "prepareSeedlingDrawable",
-            "surface-seedling"
-        ) { chain ->
-            val args = chain.args.toTypedArray()
-            val view = args.firstOrNull() as? View
-            val replacement = replacementForView(view)
-            if (replacement != null) {
-                moduleLog(
-                    "seedling forced view=${view?.javaClass?.simpleName} " +
-                        "drawable=${replacement.javaClass.simpleName}"
-                )
-                replacement
-            } else {
-                chain.proceed(args)
-            }
-        }
         moduleLog("hooked IconViewManager IconSurface sources")
 
         val recordClass = Class.forName(ICON_SURFACE_RECORD_CLASS, false, classLoader)
@@ -185,10 +158,10 @@ class OplusIconSurfaceGuard : XposedModule() {
         val view = owner as? View ?: return
         val itemInfo = runCatching { view.tag }.getOrNull() ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg)) return
+        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
 
         val themed = args.firstOrNull() as? BitmapDrawable ?: return
-        rememberExactThemed(pkg, themed, "bubble")
+        rememberExactThemed(itemInfo, themed, "bubble")
     }
 
     /**
@@ -199,17 +172,18 @@ class OplusIconSurfaceGuard : XposedModule() {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg)) return
+        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeItem(itemInfo)) return
 
         val themed = readField(previewParams, "drawable") as? BitmapDrawable ?: return
-        rememberExactThemed(pkg, themed, "preview")
+        rememberExactThemed(itemInfo, themed, "preview")
     }
 
-    private fun rememberExactThemed(pkg: String, drawable: BitmapDrawable, source: String) {
+    private fun rememberExactThemed(itemInfo: Any, drawable: BitmapDrawable, source: String) {
+        if (!ThemedIconPolicy.isThemedDrawable(drawable)) return
         val state = drawable.constantState ?: return
-        themedStates.put(pkg, state)
+        themedStates.put(ThemedIconPolicy.itemKey(itemInfo), state)
         moduleLog(
-            "exact themed cached pkg=$pkg source=$source " +
+            "exact themed cached item=${ThemedIconPolicy.itemKey(itemInfo)} source=$source " +
                 "${drawable.javaClass.simpleName} ${drawable.intrinsicWidth}x${drawable.intrinsicHeight}"
         )
     }
@@ -219,22 +193,12 @@ class OplusIconSurfaceGuard : XposedModule() {
      */
     private fun armTargetOverride(args: Array<Any?>) {
         val view = args.getOrNull(1) as? View ?: return
+        targetOverrides.remove(view)
         val itemInfo = args.getOrNull(2) ?: return
-        val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg)) return
-
-        val state = themedStates.get(pkg)
-        if (state == null) {
-            targetOverrides.remove(view)
-            moduleLog("surface override miss pkg=$pkg view=${view.javaClass.simpleName}")
-            return
-        }
-
-        targetOverrides[view] = state
-        moduleLog(
-            "surface override armed pkg=$pkg view=${view.javaClass.simpleName} " +
-                "source=exact-themed"
-        )
+        if (!ThemedIconPolicy.shouldThemeAnimation(view, itemInfo)) return
+        val key = ThemedIconPolicy.itemKey(itemInfo)
+        val state = themedStates.get(key) ?: return
+        targetOverrides[view] = TargetOverride(key, state)
     }
 
     private fun replaceDrawableArgumentFromItemInfo(args: Array<Any?>) {
@@ -243,9 +207,10 @@ class OplusIconSurfaceGuard : XposedModule() {
             ?: return
         val itemInfo = args.getOrNull(2) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg)) return
+        if (!shouldPatch(pkg) ||
+            !ThemedIconPolicy.shouldThemeAnimation(args.getOrNull(1) as? View, itemInfo)) return
 
-        val state = themedStates.get(pkg) ?: return
+        val state = themedStates.get(ThemedIconPolicy.itemKey(itemInfo)) ?: return
         val drawableIndex = args.indexOfFirst { it is Drawable }
         if (drawableIndex < 0) return
 
@@ -259,32 +224,21 @@ class OplusIconSurfaceGuard : XposedModule() {
         )
     }
 
-    private fun replacementForItemInfo(itemInfo: Any?, context: Context?): Drawable? {
-        if (itemInfo == null || context == null) return null
-        val pkg = resolvePackageName(itemInfo) ?: return null
-        if (!shouldPatch(pkg)) return null
-        val state = themedStates.get(pkg) ?: return null
-        val replacement = newDrawable(state, context)
-        moduleLog("fancy source forced pkg=$pkg drawable=${replacement.javaClass.simpleName}")
-        return replacement
-    }
-
     private fun replacementForView(view: View?): Drawable? {
         if (view == null) return null
-
-        targetOverrides[view]?.let { return newDrawable(it, view.context) }
-
-        val itemInfo = runCatching { view.tag }.getOrNull()
-        val pkg = itemInfo?.let(::resolvePackageName)
-        if (pkg != null && shouldPatch(pkg)) {
-            themedStates.get(pkg)?.let { return newDrawable(it, view.context) }
+        val itemInfo = ThemedIconPolicy.itemForView(view) ?: return null
+        if (!ThemedIconPolicy.shouldThemeAnimation(view, itemInfo)) {
+            targetOverrides.remove(view)
+            return null
         }
-
-        // Never fall back to a Launcher FastBitmapDrawable here. That is the exact source
-        // of the flash. A direct BitmapDrawable is acceptable because it can only be our
-        // themed output on the paths this module modifies.
-        val current = invokeNoArg(view, "getIcon") as? BitmapDrawable ?: return null
-        return cloneDrawable(current, view.context)
+        val key = ThemedIconPolicy.itemKey(itemInfo)
+        val override = targetOverrides[view]
+        if (override != null && override.key == key) {
+            return newDrawable(override.state, view.context)
+        }
+        targetOverrides.remove(view)
+        val state = themedStates.get(key) ?: return null
+        return newDrawable(state, view.context)
     }
 
     private fun beforeIconSurfaceLoaded(args: Array<Any?>) {
@@ -308,12 +262,6 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     private fun newDrawable(state: Drawable.ConstantState, context: Context): Drawable {
         return state.newDrawable(context.resources).mutate()
-    }
-
-    private fun cloneDrawable(drawable: Drawable, context: Context): Drawable {
-        return runCatching {
-            drawable.constantState?.newDrawable(context.resources)?.mutate()
-        }.getOrNull() ?: drawable
     }
 
     private fun shouldPatch(pkg: String): Boolean {
