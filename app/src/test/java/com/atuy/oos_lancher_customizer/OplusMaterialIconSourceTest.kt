@@ -6,11 +6,24 @@ import org.junit.Test
 
 class OplusMaterialIconSourceTest {
     @Test
-    fun onlyPreinstalledSystemAppsAreCandidates() {
-        assertTrue(OplusMaterialIconSource.isPreinstalledSystemApp(0x00000001))
-        assertTrue(OplusMaterialIconSource.isPreinstalledSystemApp(0x00000080))
-        assertTrue(OplusMaterialIconSource.isPreinstalledSystemApp(0x00000081))
-        assertFalse(OplusMaterialIconSource.isPreinstalledSystemApp(0))
-        assertFalse(OplusMaterialIconSource.isPreinstalledSystemApp(0x00000002))
+    fun onlyConfirmedOnePlusAndOplusAppsCanUseOldMaterialArtwork() {
+        assertTrue(OplusMaterialIconSource.isEligiblePackage("com.oneplus.gallery"))
+        assertTrue(OplusMaterialIconSource.isEligiblePackage("com.oneplus.filemanager"))
+        assertTrue(OplusMaterialIconSource.isEligiblePackage("com.oplus.camera"))
+
+        // Being preinstalled, or even an Android system application, is
+        // not evidence of a ColorOS 15 OEM-specific Material icon.
+        for (pkg in listOf(
+            "com.android.chrome",
+            "com.google.android.apps.maps",
+            "com.android.vending",
+            "com.google.android.gms",
+            "com.google.android.googlequicksearchbox",
+            "com.oneplus.unknown",
+            "com.oplus.unknown",
+            ""
+        )) {
+            assertFalse(pkg, OplusMaterialIconSource.isEligiblePackage(pkg))
+        }
     }
 }
