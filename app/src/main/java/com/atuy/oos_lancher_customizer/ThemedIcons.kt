@@ -204,7 +204,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
@@ -265,7 +265,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: view.context
         val isShortcut = isShortcutLikeItem(info)
         val originalSource = resolveBestSourceDrawable(context, info, source)
-        val themed = themedDrawable(context, pkg, originalSource, isShortcut) ?: return null
+        val themed = themedDrawable(context, pkg, originalSource, isShortcut, resolveComponentName(info)) ?: return null
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
         bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(themed))
@@ -286,7 +286,7 @@ class ThemedIcons : XposedModule() {
         val context = resolveContext(owner) ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         writeField(previewParams, "drawable", themed)
@@ -307,7 +307,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
@@ -510,11 +510,18 @@ class ThemedIcons : XposedModule() {
         context: Context,
         pkg: String,
         original: Drawable,
-        isShortcut: Boolean
+        isShortcut: Boolean,
+        component: ComponentName?
     ): Drawable? {
         val night = isNightMode(context)
         val sourceSig = buildSourceSignature(original)
-        val key = "$pkg|$night|$isShortcut|$sourceSig"
+        val hasLegacy = !isShortcut && Oos15MonochromeAssets.hasArtwork(context, pkg)
+        // Preserve original key and rendering for packages absent in the OOS15 archive.
+        val key = if (hasLegacy) {
+            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
+        } else {
+            "$pkg|$night|$isShortcut|$sourceSig"
+        }
 
         if (failedKeys.get(key) == true) {
             return null
@@ -529,7 +536,7 @@ class ThemedIcons : XposedModule() {
             return cached.toDrawable(context.resources)
         }
 
-        val bitmap = generateRawThemedBitmap(context, original, isShortcut)
+        val bitmap = generateRawThemedBitmap(context, pkg, original, isShortcut, component)
         if (bitmap == null) {
             failedKeys.put(key, true)
             return null
@@ -597,9 +604,12 @@ class ThemedIcons : XposedModule() {
 
     private fun generateRawThemedBitmap(
         context: Context,
+        pkg: String,
         original: Drawable,
-        isShortcut: Boolean
+        isShortcut: Boolean,
+        component: ComponentName?
     ): Bitmap? {
+        val legacyBitmap = if (!isShortcut) Oos15MonochromeAssets.load(context, pkg, component) else null
         val isDarkMode = isNightMode(context)
         val bgColor = context.getColor(
             if (isDarkMode) android.R.color.system_neutral1_800
@@ -623,7 +633,9 @@ class ThemedIcons : XposedModule() {
                 )
 
         val monoDrawable: Drawable =
-            if (isTrueAdaptive) {
+            if (legacyBitmap != null) {
+                BitmapDrawable(context.resources, legacyBitmap).mutate()
+            } else if (isTrueAdaptive) {
                 original.monochrome!!.mutate()
             } else {
                 val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
@@ -649,6 +661,13 @@ class ThemedIcons : XposedModule() {
             }
 
         val baseIconSize = when {
+            // The OOS15 PNG canvas contains substantial intrinsic padding.
+            // Zoom only its foreground (not the circular theme background).
+            // ConsumerIR's glyph approaches the lower PNG edge; a smaller
+            // scale avoids clipping its off-center design.
+            legacyBitmap != null -> (
+                size * Oos15MonochromeAssets.glyphScale(pkg)
+            ).roundToInt()
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
             isAdaptive -> (size * 1.50f).toInt()
