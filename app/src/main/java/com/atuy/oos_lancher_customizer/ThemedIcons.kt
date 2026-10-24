@@ -23,7 +23,6 @@ import android.os.UserHandle
 import android.util.Log
 import android.util.LruCache
 import android.view.View
-import android.widget.TextView
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
 import io.github.libxposed.api.XposedInterface
@@ -51,8 +50,6 @@ class ThemedIcons : XposedModule() {
         private const val BIG_FOLDER_ITEM_CLASS =
             "com.android.launcher3.folder.big.BigFolderItemIcon"
         private const val FLOATING_ICON_VIEW_CLASS = "com.android.launcher3.views.FloatingIconView"
-        private const val POPUP_CLASS =
-            "com.android.launcher3.popup.PopupContainerWithArrow"
         private const val LOG_EVERY_N_HITS = 30L
     }
 
@@ -70,10 +67,6 @@ class ThemedIcons : XposedModule() {
     )
     private val bigFolderViewCache =
         Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
-    private val restoringDraw =
-        Collections.synchronizedMap(WeakHashMap<View, Boolean>())
-    private val pendingPopupFinish =
-        Collections.synchronizedMap(WeakHashMap<View, Boolean>())
     @Volatile
     private var hooksInstalled = false
 
@@ -202,9 +195,7 @@ class ThemedIcons : XposedModule() {
 
         if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
 
-        // Already themed drawables can be restored from a saved ConstantState.
-        // Do not run them back through MonochromeIconFactory, which destroys
-        // their shapes and may change icon scale on popup dismissal.
+        // Skip already themed drawables to avoid repeated monochrome conversion.
         if (ThemedIconPolicy.isThemedDrawable(drawable)) {
             ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
             return
@@ -278,9 +269,6 @@ class ThemedIcons : XposedModule() {
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
         bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(themed))
-        moduleLog("BigFolderItemIcon snapshot CREATED item=" +
-            ThemedIconPolicy.itemKey(info) + " drawable=" +
-            source.javaClass.simpleName)
         return themed
     }
 
