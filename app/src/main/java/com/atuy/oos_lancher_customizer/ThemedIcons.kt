@@ -133,7 +133,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         args[0] = themed
@@ -152,7 +152,7 @@ class ThemedIcons : XposedModule() {
         val context = resolveContext(owner) ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         writeField(previewParams, "drawable", themed)
@@ -173,7 +173,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut) ?: return
+        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
         ThemedIconPolicy.rememberDrawable(themed)
         themed.bounds = drawable.bounds
         args[0] = themed
@@ -376,11 +376,12 @@ class ThemedIcons : XposedModule() {
         context: Context,
         pkg: String,
         original: Drawable,
-        isShortcut: Boolean
+        isShortcut: Boolean,
+        component: ComponentName?
     ): Drawable? {
         val night = isNightMode(context)
         val sourceSig = buildSourceSignature(original)
-        val key = "$pkg|$night|$isShortcut|$sourceSig"
+        val key = "$pkg|$night|$isShortcut|$sourceSig|oem-material-v1"
 
         if (failedKeys.get(key) == true) {
             return null
@@ -395,7 +396,15 @@ class ThemedIcons : XposedModule() {
             return cached.toDrawable(context.resources)
         }
 
-        val bitmap = generateRawThemedBitmap(context, original, isShortcut)
+        // Query the dedicated ColorOS monochrome source only on a cache miss.
+        // Do not use native app-style icons for deep shortcuts.
+        val oemArt = if (!isShortcut && component != null) {
+            OplusMaterialIconSource.load(context, component, original)
+        } else null
+        val bitmap = generateRawThemedBitmap(context, original, isShortcut, oemArt)
+        if (bitmap != null && oemArt != null) {
+            moduleLog("OEM Material icon selected pkg=$pkg via " + oemArt.source)
+        }
         if (bitmap == null) {
             failedKeys.put(key, true)
             return null
@@ -464,7 +473,8 @@ class ThemedIcons : XposedModule() {
     private fun generateRawThemedBitmap(
         context: Context,
         original: Drawable,
-        isShortcut: Boolean
+        isShortcut: Boolean,
+        oemArtwork: OplusMaterialIconSource.Artwork?
     ): Bitmap? {
         val isDarkMode = isNightMode(context)
         val bgColor = context.getColor(
@@ -489,11 +499,16 @@ class ThemedIcons : XposedModule() {
                 )
 
         val monoDrawable: Drawable =
-            if (isTrueAdaptive) {
-                original.monochrome!!.mutate()
-            } else {
-                val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
-                MonochromeIconFactory(original, size, context.resources).create()
+            when {
+                oemArtwork != null -> {
+                    val art = oemArtwork.drawable
+                    art.constantState?.newDrawable(context.resources)?.mutate() ?: art.mutate()
+                }
+                isTrueAdaptive -> original.monochrome!!.mutate()
+                else -> {
+                    val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
+                    MonochromeIconFactory(original, size, context.resources).create()
+                }
             }
 
         val size = 192
@@ -515,6 +530,7 @@ class ThemedIcons : XposedModule() {
             }
 
         val baseIconSize = when {
+            oemArtwork != null -> if (oemArtwork.adaptiveLayer) (size * 1.50f).toInt() else size
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
             isAdaptive -> (size * 1.50f).toInt()
