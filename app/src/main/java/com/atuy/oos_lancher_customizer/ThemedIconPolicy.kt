@@ -43,7 +43,16 @@ internal object ThemedIconPolicy {
         themedDrawables[drawable] = true
         if (item != null && shouldThemeItem(item)) {
             drawable.constantState?.let { state ->
-                synchronized(themedStates) { themedStates[itemKey(item)] = state }
+                // Folder preview rendering changes alpha on its Drawable.
+                // Cache a *detached* ConstantState so a dimmed frame cannot
+                // overwrite the icon used by the app-close animation.
+                val cleanState = runCatching {
+                    state.newDrawable().mutate().apply {
+                        alpha = 255
+                        clearColorFilter()
+                    }.constantState
+                }.getOrNull() ?: state
+                synchronized(themedStates) { themedStates[itemKey(item)] = cleanState }
             }
         }
     }
