@@ -4,7 +4,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.graphics.drawable.Drawable
 import android.view.View
-import android.util.LruCache
 import java.util.Collections
 import java.util.Locale
 import java.util.WeakHashMap
@@ -32,19 +31,25 @@ internal object ThemedIconPolicy {
     // Shared between ThemedIcons, FloatingIconGuard and IconSurfaceGuard.
     // Key by the complete launcher item identity, never the package name alone.
     // Bounded to avoid keeping an entire app drawer worth of BitmapDrawable states.
-    private val themedStates = object : LruCache<String, Drawable.ConstantState>(128) {}
+    private val themedStates = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Drawable.ConstantState>(128, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<String, Drawable.ConstantState>?
+            ): Boolean = size > 128
+        }
+    )
 
     fun rememberDrawable(drawable: Drawable, item: Any? = null) {
         themedDrawables[drawable] = true
         if (item != null && shouldThemeItem(item)) {
             drawable.constantState?.let { state ->
-                synchronized(themedStates) { themedStates.put(itemKey(item), state) }
+                synchronized(themedStates) { themedStates[itemKey(item)] = state }
             }
         }
     }
 
     fun themedStateFor(item: Any): Drawable.ConstantState? =
-        synchronized(themedStates) { themedStates.get(itemKey(item)) }
+        synchronized(themedStates) { themedStates[itemKey(item)] }
 
     fun isThemedDrawable(drawable: Drawable): Boolean = themedDrawables[drawable] == true
 
