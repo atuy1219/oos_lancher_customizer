@@ -66,7 +66,7 @@ internal object ThemedIconPolicy {
         val simpleName = name.substringAfterLast('.')
         // ShortcutAndWidgetContainer is the normal CellLayout child on the desktop.
         if (simpleName.contains("widget") &&
-            simpleName != "shortcutandwidgetcontainer") return true
+            !simpleName.endsWith("shortcutandwidgetcontainer")) return true
         return listOf(
             "allapps", "drawer", "category", "cluster", "searchresult",
             "taskbar", "prediction", "recommend", "smartsidebar", "cardcontainer"
