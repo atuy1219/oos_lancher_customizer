@@ -77,7 +77,6 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
-        moduleLog("injected launcher process; ColorOS16 IconSurface guard initializing")
 
         runCatching {
             installHooks(param.defaultClassLoader)
@@ -207,7 +206,7 @@ class OplusIconSurfaceGuard : XposedModule() {
         if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
 
         val themed = args.firstOrNull() as? BitmapDrawable ?: return
-        rememberExactThemed(itemInfo, themed, "bubble")
+        rememberExactThemed(itemInfo, themed)
     }
 
     /**
@@ -221,17 +220,12 @@ class OplusIconSurfaceGuard : XposedModule() {
         if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val themed = readField(previewParams, "drawable") as? BitmapDrawable ?: return
-        rememberExactThemed(itemInfo, themed, "preview")
+        rememberExactThemed(itemInfo, themed)
     }
 
-    private fun rememberExactThemed(itemInfo: Any, drawable: BitmapDrawable, source: String) {
+    private fun rememberExactThemed(itemInfo: Any, drawable: BitmapDrawable) {
         if (!ThemedIconPolicy.isThemedDrawable(drawable)) return
-        if (drawable.constantState == null) return
-        ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
-        moduleLog(
-            "exact themed cached item=${ThemedIconPolicy.itemKey(itemInfo)} source=$source " +
-                "${drawable.javaClass.simpleName} ${drawable.intrinsicWidth}x${drawable.intrinsicHeight}"
-        )
+        if (drawable.constantState != null) ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
     }
 
     /**
@@ -240,40 +234,25 @@ class OplusIconSurfaceGuard : XposedModule() {
     private fun armTargetOverride(owner: Any?, args: Array<Any?>, stage: String) {
         val view = args.getOrNull(1) as? View ?: return
         targetOverrides.remove(view)
-        // An async phase should not delete the validated manager snapshot left
-        // by fetchIcon unless it is explicitly re-armed or a new load starts.
         if (stage == "fetch" && owner != null) callbackTargets.remove(owner)
-        val itemInfo = args.getOrNull(2) ?: return
-        val type = readField(itemInfo, "itemType")
-        val container = readField(itemInfo, "container")
-        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, itemInfo)) {
-            moduleLog("v16 $stage skip view=${view.javaClass.simpleName} " +
-                "item=${itemInfo.javaClass.simpleName} type=$type container=$container")
-            return
-        }
-        val key = ThemedIconPolicy.itemKey(itemInfo)
-        var state = ThemedIconPolicy.themedStateFor(itemInfo)
+        val item = args.getOrNull(2) ?: return
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, item)) return
+
+        var state = ThemedIconPolicy.themedStateFor(item)
         if (state == null && view.javaClass.name ==
             "com.android.launcher3.folder.big.BigFolderItemIcon") {
-            // This is a plain View: BubbleTextView#setIcon never receives its
-            // drawable. Force its verified 16.6.20 drawable getter, now hooked
-            // by ThemedIcons, so the exact app snapshot exists before getIcon().
+            // BigFolderItemIcon does not pass through BubbleTextView#setIcon.
+            // Its drawable getter populates the cache on first use.
             runCatching { invokeNoArg(view, "getDrawableByIndex") }
-            state = ThemedIconPolicy.themedStateFor(itemInfo)
-            if (state != null) {
-                moduleLog("v16 $stage BigFolder snapshot recovered item=$key")
-            }
+            state = ThemedIconPolicy.themedStateFor(item)
         }
-        if (state == null) {
-            moduleLog("v16 $stage snapshot MISS view=${view.javaClass.simpleName} " +
-                "item=$key")
-            return
-        }
-        targetOverrides[view] = TargetOverride(key, state, itemInfo)
+        if (state == null) return
+
+        val key = ThemedIconPolicy.itemKey(item)
+        targetOverrides[view] = TargetOverride(key, state, item)
         if (owner != null) {
-            callbackTargets[owner] = CallbackTarget(key, itemInfo, WeakReference(view), state)
+            callbackTargets[owner] = CallbackTarget(key, item, WeakReference(view), state)
         }
-        moduleLog("v16 $stage ARMED view=${view.javaClass.simpleName} item=$key")
     }
 
     private fun wrapV16Callback(owner: Any?, args: Array<Any?>) {
@@ -287,7 +266,6 @@ class OplusIconSurfaceGuard : XposedModule() {
         }.getOrNull() ?: return
         if (!callbackInterface.isInterface || !callbackInterface.isInstance(callback)) return
         val target = callbackTargets[owner]
-        moduleLog("v16 getIcon callback registered target=${target?.key ?: "none"}")
         if (target == null) return
         val proxy = Proxy.newProxyInstance(
             callbackInterface.classLoader,
@@ -302,10 +280,6 @@ class OplusIconSurfaceGuard : XposedModule() {
                     val themed = newDrawable(target.state, view.context)
                     themed.bounds = original.bounds
                     values[0] = themed
-                    moduleLog("v16 callback REPLACED view=${view.javaClass.simpleName} " +
-                        "original=${original.javaClass.simpleName} item=${target.key}")
-                } else {
-                    moduleLog("v16 callback skipped: target no longer valid")
                 }
             }
             try {
@@ -334,10 +308,6 @@ class OplusIconSurfaceGuard : XposedModule() {
         val replacement = newDrawable(state, context)
         replacement.bounds = original?.bounds ?: replacement.bounds
         args[drawableIndex] = replacement
-        moduleLog(
-            "async source forced pkg=$pkg ${original?.javaClass?.simpleName} -> " +
-                replacement.javaClass.simpleName
-        )
     }
 
     private fun replacementForView(view: View?): Drawable? {
@@ -373,10 +343,6 @@ class OplusIconSurfaceGuard : XposedModule() {
         replacement.bounds = original?.bounds ?: replacement.bounds
         args[drawableIndex] = replacement
 
-        moduleLog(
-            "surface sink forced view=${view.javaClass.simpleName} " +
-                "${original?.javaClass?.simpleName} -> ${replacement.javaClass.simpleName}"
-        )
     }
 
     private fun newDrawable(state: Drawable.ConstantState, context: Context): Drawable {
@@ -456,14 +422,7 @@ class OplusIconSurfaceGuard : XposedModule() {
     }
 
     private fun moduleLog(msg: String, throwable: Throwable? = null) {
-        // Two independent channels: LSPosed's module log and Android logcat.
-        // A blank grep of modules_*.log alone is not proof that the hook failed.
-        if (throwable == null) {
-            Log.i(TAG, msg)
-            log(Log.INFO, TAG, msg)
-        } else {
-            Log.e(TAG, msg, throwable)
-            log(Log.ERROR, TAG, msg, throwable)
-        }
+        if (throwable == null) log(Log.INFO, TAG, msg)
+        else log(Log.ERROR, TAG, msg, throwable)
     }
 }
