@@ -30,11 +30,7 @@ class Oos15MonochromeAssetsTest {
         }
     }
     @Test fun distinguishDialerFromContactsComponent() {
-        assertTrue(Oos15MonochromeAssets.isDialerActivity(
-            android.content.ComponentName("com.android.contacts", "com.android.contacts.activities.DialtactsActivity")
-        ))
-        assertFalse(Oos15MonochromeAssets.isDialerActivity(
-            android.content.ComponentName("com.android.contacts", "com.android.contacts.activities.PeopleActivity")
-        ))
+        assertTrue(Oos15MonochromeAssets.isDialerActivityName("com.android.contacts.activities.DialtactsActivity"))
+        assertFalse(Oos15MonochromeAssets.isDialerActivityName("com.android.contacts.activities.PeopleActivity"))
     }
 }
