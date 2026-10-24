@@ -380,7 +380,13 @@ class OplusIconSurfaceGuard : XposedModule() {
     }
 
     private fun newDrawable(state: Drawable.ConstantState, context: Context): Drawable {
-        return state.newDrawable(context.resources).mutate()
+        // BigFolderPreviewItemManager#drawPreviewItemWithAlpha temporarily lowers the
+        // same drawable's alpha. The animation needs an independent fully opaque
+        // snapshot; the launcher controls animation fading at its own Surface layer.
+        return state.newDrawable(context.resources).mutate().apply {
+            alpha = 255
+            clearColorFilter()
+        }
     }
 
     private fun shouldPatch(pkg: String): Boolean {
