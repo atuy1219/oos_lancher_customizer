@@ -27,12 +27,15 @@ internal object Oos15MonochromeAssets {
             (value.byteCount + 1023) / 1024
     }
 
-    internal fun isDialerActivity(component: ComponentName?): Boolean {
-        val cls = component?.className ?: return false
+    internal fun isDialerActivityName(cls: String?): Boolean {
+        if (cls == null) return false
         return cls.contains("dialer", ignoreCase = true) ||
             cls.contains("dialtacts", ignoreCase = true) ||
             cls.contains("phone", ignoreCase = true)
     }
+
+    internal fun isDialerActivity(component: ComponentName?): Boolean =
+        isDialerActivityName(component?.className)
 
     private fun assetKey(pkg: String, file: String) = "$pkg/$file"
 
