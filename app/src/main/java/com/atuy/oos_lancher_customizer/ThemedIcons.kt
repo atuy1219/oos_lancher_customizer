@@ -28,6 +28,7 @@ import androidx.core.graphics.drawable.toDrawable
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
+import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.nio.ByteBuffer
@@ -62,9 +63,9 @@ class ThemedIcons : XposedModule() {
     // getDrawableByIndex may run every frame. Do not allocate a new themed
     // Drawable from ConstantState on every draw.
     private data class BigFolderCacheEntry(
-        val original: Drawable,
+        val original: WeakReference<Drawable>,
         val itemKey: String,
-        val themed: Drawable
+        val themed: WeakReference<Drawable>
     )
     private val bigFolderViewCache =
         Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
@@ -340,9 +341,11 @@ class ThemedIcons : XposedModule() {
         }
         val key = ThemedIconPolicy.itemKey(info)
         val cached = bigFolderViewCache[view]
-        if (cached != null && cached.original === source && cached.itemKey == key) {
-            cached.themed.bounds = source.bounds
-            return cached.themed
+        val reused = cached?.themed?.get()
+        if (cached != null && cached.original.get() === source &&
+            cached.itemKey == key && reused != null) {
+            reused.bounds = source.bounds
+            return reused
         }
 
         // A BigFolderItemIcon getter can be called during animations. Prefer
@@ -353,7 +356,7 @@ class ThemedIcons : XposedModule() {
             val restored = existing.newDrawable(view.resources).mutate()
             restored.bounds = source.bounds
             ThemedIconPolicy.rememberDrawable(restored, info)
-            bigFolderViewCache[view] = BigFolderCacheEntry(source, key, restored)
+            bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(restored))
             return restored
         }
 
@@ -363,7 +366,7 @@ class ThemedIcons : XposedModule() {
         val themed = themedDrawable(context, pkg, originalSource, isShortcut) ?: return null
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
-        bigFolderViewCache[view] = BigFolderCacheEntry(source, key, themed)
+        bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(themed))
         moduleLog("BigFolderItemIcon snapshot CREATED item=" +
             ThemedIconPolicy.itemKey(info) + " drawable=" +
             source.javaClass.simpleName)
