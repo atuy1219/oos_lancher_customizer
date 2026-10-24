@@ -158,17 +158,22 @@ internal object ThemedIconPolicy {
      * Accept that indirection only when the folder's database ID equals the app's
      * positive container ID and the folder itself belongs to the home workspace.
      */
+    internal fun isMatchingHomeFolder(
+        itemContainer: Long?, folderId: Long?, folderContainer: Int?
+    ): Boolean =
+        itemContainer != null && itemContainer > 0L && itemContainer == folderId &&
+            isHomeContainer(folderContainer)
+
     fun shouldThemeSurfaceTarget(view: View?, item: Any?): Boolean {
         if (shouldThemeAnimation(view, item)) return true
         if (view == null || !shouldThemeItem(item)) return false
         if (hasExcludedAncestor(view)) return false
         if (!view.javaClass.name.contains("FolderIcon")) return false
         val childContainer = (read(item!!, "container") as? Number)?.toLong() ?: return false
-        if (childContainer <= 0L) return false
         val folderInfo = call(view, "getInfo") ?: read(view, "mInfo") ?: view.tag ?: return false
-        val folderId = (read(folderInfo, "id") as? Number)?.toLong() ?: return false
+        val folderId = (read(folderInfo, "id") as? Number)?.toLong()
         val parentContainer = (read(folderInfo, "container") as? Number)?.toInt()
-        return folderId == childContainer && isHomeContainer(parentContainer)
+        return isMatchingHomeFolder(childContainer, folderId, parentContainer)
     }
 
     // Package names alone collide between activities, profiles and deep shortcuts.
