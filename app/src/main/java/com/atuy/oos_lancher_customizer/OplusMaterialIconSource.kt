@@ -50,40 +50,12 @@ internal object OplusMaterialIconSource {
             return Artwork(legacy, adaptiveLayer = false, source = "coloros15")
         }
 
-        // OplusUxIconManager is called by current ColorOS' convertToThemeStyle().
-        // Only a dedicated monochrome layer qualifies; a color composite does not.
-        val native = runCatching {
-            val manager = Class.forName(
-                "com.oplus.icon.OplusUxIconManager",
-                false,
-                context.classLoader
-            )
-            val method = manager.declaredMethods.firstOrNull {
-                it.name == "getUxIconDrawable" &&
-                    it.parameterTypes.size == 4 &&
-                    it.parameterTypes[0].isAssignableFrom(pm.javaClass) &&
-                    it.parameterTypes[1] == String::class.java &&
-                    Drawable::class.java.isAssignableFrom(it.parameterTypes[2]) &&
-                    it.parameterTypes[3] == Boolean::class.javaPrimitiveType &&
-                    Modifier.isStatic(it.modifiers)
-            } ?: return@runCatching null
-            method.isAccessible = true
-            method.invoke(null, pm, component.packageName, original, false) as? Drawable
-        }.getOrNull() ?: return null
-
-        val mono = if (native is AdaptiveIconDrawable) {
-            native.monochrome
-        } else {
-            runCatching {
-                val method = native.javaClass.methods.firstOrNull {
-                    it.name == "getMonochrome" && it.parameterCount == 0 &&
-                        Drawable::class.java.isAssignableFrom(it.returnType)
-                }
-                method?.invoke(native) as? Drawable
-            }.getOrNull()
-        } ?: return null
-
-        Log.i(TAG, "framework monochrome artwork: " + component.flattenToShortString())
-        return Artwork(mono, adaptiveLayer = true, source = "oplus-framework")
+        // getUxIconDrawable on ColorOS 17 may return a full-color adaptive icon with
+        // a monochrome layer copied from the app itself. It is NOT the ColorOS 15
+        // built-in special Material glyph. Passing this layer through our rendering
+        // pipeline also inflated a subset of icons (previous v1 used 1.5x scaling).
+        // Do not replace the known-good icon until the dedicated morphicon loader
+        // can be invoked with a verified built-in style configuration.
+        return null
     }
 }
