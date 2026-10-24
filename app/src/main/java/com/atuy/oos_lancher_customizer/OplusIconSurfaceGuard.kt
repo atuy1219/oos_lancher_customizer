@@ -252,7 +252,19 @@ class OplusIconSurfaceGuard : XposedModule() {
             return
         }
         val key = ThemedIconPolicy.itemKey(itemInfo)
-        val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: run {
+        var state = ThemedIconPolicy.themedStateFor(itemInfo)
+        if (state == null && view.javaClass.name ==
+            "com.android.launcher3.folder.big.BigFolderItemIcon") {
+            // This is a plain View: BubbleTextView#setIcon never receives its
+            // drawable. Force its verified 16.6.20 drawable getter, now hooked
+            // by ThemedIcons, so the exact app snapshot exists before getIcon().
+            runCatching { invokeNoArg(view, "getDrawableByIndex") }
+            state = ThemedIconPolicy.themedStateFor(itemInfo)
+            if (state != null) {
+                moduleLog("v16 $stage BigFolder snapshot recovered item=$key")
+            }
+        }
+        if (state == null) {
             moduleLog("v16 $stage snapshot MISS view=${view.javaClass.simpleName} " +
                 "item=$key")
             return
