@@ -666,7 +666,7 @@ class ThemedIcons : XposedModule() {
             // ConsumerIR's glyph approaches the lower PNG edge; a smaller
             // scale avoids clipping its off-center design.
             legacyBitmap != null -> (
-                size * (if (pkg == "com.oplus.consumerIRApp") 1.08f else 1.12f)
+                size * Oos15MonochromeAssets.glyphScale(pkg)
             ).roundToInt()
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
