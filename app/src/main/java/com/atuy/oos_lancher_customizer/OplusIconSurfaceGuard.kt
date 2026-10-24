@@ -11,6 +11,9 @@ import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import java.lang.reflect.Field
 import java.lang.reflect.Method
+import java.lang.reflect.Proxy
+import java.lang.reflect.InvocationTargetException
+import java.lang.ref.WeakReference
 import java.util.Collections
 import java.util.WeakHashMap
 
@@ -58,6 +61,19 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     private val targetOverrides =
         Collections.synchronizedMap(WeakHashMap<View, TargetOverride>())
+
+    // IconSurfaceRecord calls IconViewManager#getIcon before the asynchronous
+    // drawable has necessarily finished loading. Retain its exact validated target
+    // until the callback, rather than waiting for onIconLoaded (which may already
+    // receive a reconstructed full-color drawable).
+    private data class CallbackTarget(
+        val key: String,
+        val info: Any,
+        val view: WeakReference<View>,
+        val state: Drawable.ConstantState
+    )
+    private val callbackTargets =
+        Collections.synchronizedMap(WeakHashMap<Any, CallbackTarget>())
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
@@ -118,7 +134,7 @@ class OplusIconSurfaceGuard : XposedModule() {
 
         hookAllNamedMethods(managerClass, "fetchIcon", "surface-fetchIcon") { chain ->
             val args = chain.args.toTypedArray()
-            armTargetOverride(args)
+            armTargetOverride(chain.thisObject, args, "fetch")
             chain.proceed(args)
         }
 
@@ -128,12 +144,25 @@ class OplusIconSurfaceGuard : XposedModule() {
             "surface-async-result"
         ) { chain ->
             val args = chain.args.toTypedArray()
-            armTargetOverride(args)
+            armTargetOverride(chain.thisObject, args, "async")
             replaceDrawableArgumentFromItemInfo(args)
             chain.proceed(args)
         }
 
-        moduleLog("hooked IconViewManager IconSurface sources")
+        // The callback may be registered before the loader fills resultDrawable.
+        // This is the single sink used for both pre-load and return animations.
+        hookAllNamedMethods(managerClass, "getIcon", "surface-v16-callback") { chain ->
+            val args = chain.args.toTypedArray()
+            wrapV16Callback(chain.thisObject, args)
+            chain.proceed(args)
+        }
+
+        hookAllNamedMethods(managerClass, "release", "surface-v16-release") { chain ->
+            chain.thisObject?.let(callbackTargets::remove)
+            chain.proceed()
+        }
+
+        moduleLog("hooked IconViewManager fetch/async/getIcon callback/release")
 
         hookAllNamedMethods(recordClass, "onIconLoaded", "surface-final-sink") { chain ->
             val args = chain.args.toTypedArray()
@@ -203,26 +232,72 @@ class OplusIconSurfaceGuard : XposedModule() {
     /**
      * Known IconViewManager methods begin with (Launcher, View, ItemInfo, ...).
      */
-    private fun armTargetOverride(args: Array<Any?>) {
+    private fun armTargetOverride(owner: Any?, args: Array<Any?>, stage: String) {
         val view = args.getOrNull(1) as? View ?: return
         targetOverrides.remove(view)
+        // An async phase should not delete the validated manager snapshot left
+        // by fetchIcon unless it is explicitly re-armed or a new load starts.
+        if (stage == "fetch" && owner != null) callbackTargets.remove(owner)
         val itemInfo = args.getOrNull(2) ?: return
+        val type = readField(itemInfo, "itemType")
+        val container = readField(itemInfo, "container")
         if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, itemInfo)) {
-            if (view.javaClass.name.contains("FolderIcon")) {
-                moduleLog("v16 folder surface rejected: view=${view.javaClass.simpleName} " +
-                    "item=${itemInfo.javaClass.simpleName}")
-            }
+            moduleLog("v16 $stage skip view=${view.javaClass.simpleName} " +
+                "item=${itemInfo.javaClass.simpleName} type=$type container=$container")
             return
         }
         val key = ThemedIconPolicy.itemKey(itemInfo)
         val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: run {
-            if (view.javaClass.name.contains("FolderIcon")) {
-                moduleLog("v16 folder themed snapshot missing item=$key")
-            }
+            moduleLog("v16 $stage snapshot MISS view=${view.javaClass.simpleName} " +
+                "item=$key")
             return
         }
         targetOverrides[view] = TargetOverride(key, state, itemInfo)
-        moduleLog("v16 themed target armed view=${view.javaClass.simpleName} item=$key")
+        if (owner != null) {
+            callbackTargets[owner] = CallbackTarget(key, itemInfo, WeakReference(view), state)
+        }
+        moduleLog("v16 $stage ARMED view=${view.javaClass.simpleName} item=$key")
+    }
+
+    private fun wrapV16Callback(owner: Any?, args: Array<Any?>) {
+        if (owner == null || args.size < 2) return
+        val callback = args[0] ?: return
+        val callbackInterface = runCatching {
+            Class.forName(
+                "com.android.launcher3.anim.iconsurfacemanager.IconViewCallback",
+                false, owner.javaClass.classLoader
+            )
+        }.getOrNull() ?: return
+        if (!callbackInterface.isInterface || !callbackInterface.isInstance(callback)) return
+        val target = callbackTargets[owner]
+        moduleLog("v16 getIcon callback registered target=${target?.key ?: "none"}")
+        if (target == null) return
+        val proxy = Proxy.newProxyInstance(
+            callbackInterface.classLoader,
+            arrayOf(callbackInterface)
+        ) { _, method, supplied ->
+            val values = supplied?.copyOf() ?: emptyArray()
+            if (method.name == "onDrawableLoaded" && values.firstOrNull() is Drawable) {
+                val view = target.view.get()
+                if (view != null && ThemedIconPolicy.shouldThemeSurfaceTarget(view, target.info) &&
+                    ThemedIconPolicy.itemKey(target.info) == target.key) {
+                    val original = values[0] as Drawable
+                    val themed = newDrawable(target.state, view.context)
+                    themed.bounds = original.bounds
+                    values[0] = themed
+                    moduleLog("v16 callback REPLACED view=${view.javaClass.simpleName} " +
+                        "original=${original.javaClass.simpleName} item=${target.key}")
+                } else {
+                    moduleLog("v16 callback skipped: target no longer valid")
+                }
+            }
+            try {
+                method.invoke(callback, *values)
+            } catch (error: InvocationTargetException) {
+                throw error.targetException
+            }
+        }
+        args[0] = proxy
     }
 
     private fun replaceDrawableArgumentFromItemInfo(args: Array<Any?>) {
