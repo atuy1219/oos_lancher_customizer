@@ -23,6 +23,7 @@ import android.os.UserHandle
 import android.util.Log
 import android.util.LruCache
 import android.view.View
+import android.widget.TextView
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
 import io.github.libxposed.api.XposedInterface
@@ -295,16 +296,17 @@ class ThemedIcons : XposedModule() {
             }
             restored.bounds = displayed?.bounds ?: compound?.bounds ?: restored.bounds
             ThemedIconPolicy.rememberDrawable(restored, item)
-            // Let the launcher update its own layout, then repair the actual
-            // compound drawable if the OEM extension intercepted setIcon.
-            findOneArgMethod(view, "setIcon", Drawable::class.java)?.invoke(view, restored)
-            val nowIcon = readField(view, "mIcon") as? Drawable
-            val nowCompound = invokeNoArg(view, "getCompoundDrawable") as? Drawable
-            if (nowIcon == null || !ThemedIconPolicy.isThemedDrawable(nowIcon) ||
-                nowCompound == null || !ThemedIconPolicy.isThemedDrawable(nowCompound)) {
-                writeField(view, "mIcon", restored)
-                findOneArgMethod(view, "applyCompoundDrawables", Drawable::class.java)
-                    ?.invoke(view, restored)
+            // ColorOS 16 OplusBubbleTextView#applyCompoundDrawables always invokes
+            // OPlusIconChangeAnimManager#startIconChangeAnimIfNeeded, potentially
+            // reintroducing an unthemed layer when the popup closes. Write the
+            // standard TextView compound image directly with the correct bounds,
+            // without starting an OEM icon-transition animation.
+            writeField(view, "mIcon", restored)
+            val label = view as? TextView
+            if (readField(view, "mLayoutHorizontal") == true) {
+                label?.setCompoundDrawablesRelative(restored, null, null, null)
+            } else {
+                label?.setCompoundDrawables(null, restored, null, null)
             }
             moduleLog(
                 "drawIcon restored force=$force item=" + ThemedIconPolicy.itemKey(item) +
