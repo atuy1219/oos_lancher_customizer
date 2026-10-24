@@ -69,6 +69,8 @@ class ThemedIcons : XposedModule() {
     )
     private val bigFolderViewCache =
         Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
+    private val restoringDraw =
+        Collections.synchronizedMap(WeakHashMap<View, Boolean>())
     @Volatile
     private var hooksInstalled = false
 
@@ -107,6 +109,15 @@ class ThemedIcons : XposedModule() {
             chain.proceed(args)
         }
         moduleLog("hooked BubbleTextView#applyCompoundDrawables")
+
+        // 16.6.20 can switch a BubbleTextView drawable directly while the
+        // long-press popup is active, without calling setIcon again. Check the
+        // icon at the actual drawing sink, not only at bind/pop-up time.
+        hookAllNamedMethods(bubbleTextViewClass, "drawIcon", "bubble-drawIcon") { chain ->
+            restoreBeforeBubbleDraw(chain.thisObject)
+            chain.proceed()
+        }
+        moduleLog("hooked BubbleTextView#drawIcon for popup rebind recovery")
 
         runCatching {
             val previewManagerClass = Class.forName(PREVIEW_MANAGER_CLASS, false, classLoader)
@@ -260,6 +271,39 @@ class ThemedIcons : XposedModule() {
         moduleLog("compound theme restored item=" + ThemedIconPolicy.itemKey(item))
     }
 
+    private fun restoreBeforeBubbleDraw(owner: Any?) {
+        val view = owner as? View ?: return
+        if (restoringDraw[view] == true) return
+        val item = ThemedIconPolicy.itemForView(view)
+            ?: readField(view, "mInfo")
+            ?: return
+        if (!ThemedIconPolicy.shouldThemeView(view, item)) return
+        val displayed = readField(view, "mIcon") as? Drawable
+        val compound = invokeNoArg(view, "getCompoundDrawable") as? Drawable
+        if (displayed != null && ThemedIconPolicy.isThemedDrawable(displayed) &&
+            (compound == null || ThemedIconPolicy.isThemedDrawable(compound))) return
+
+        val state = ThemedIconPolicy.themedStateFor(item) ?: return
+        restoringDraw[view] = true
+        try {
+            val restored = state.newDrawable(view.resources).mutate()
+            restored.alpha = 255
+            restored.bounds = displayed?.bounds ?: compound?.bounds ?: restored.bounds
+            ThemedIconPolicy.rememberDrawable(restored, item)
+            val method = findOneArgMethod(view, "setIcon", Drawable::class.java) ?: return
+            method.invoke(view, restored)
+            moduleLog(
+                "drawIcon restored after popup item=" + ThemedIconPolicy.itemKey(item) +
+                    " mIcon=" + displayed?.javaClass?.simpleName +
+                    " compound=" + compound?.javaClass?.simpleName
+            )
+        } catch (error: Throwable) {
+            moduleLog("drawIcon restore failed: " + error.message, error)
+        } finally {
+            restoringDraw.remove(view)
+        }
+    }
+
     private fun restoreIconAfterPopup(owner: Any?, stage: String) {
         val iconView = readField(owner, "mOriginalIcon") as? View ?: return
         iconView.post {
@@ -282,6 +326,7 @@ class ThemedIcons : XposedModule() {
             }
 
             val restored = state.newDrawable(iconView.resources).mutate()
+            restored.alpha = 255
             if (displayedIcon != null) restored.bounds = displayedIcon.bounds
             ThemedIconPolicy.rememberDrawable(restored, item)
             runCatching {
