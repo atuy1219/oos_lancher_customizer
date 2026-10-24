@@ -518,7 +518,7 @@ class ThemedIcons : XposedModule() {
         val hasLegacy = !isShortcut && Oos15MonochromeAssets.hasArtwork(context, pkg)
         // Preserve original key and rendering for packages absent in the OOS15 archive.
         val key = if (hasLegacy) {
-            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v2-scale112|${component?.className}"
+            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
         } else {
             "$pkg|$night|$isShortcut|$sourceSig"
         }
