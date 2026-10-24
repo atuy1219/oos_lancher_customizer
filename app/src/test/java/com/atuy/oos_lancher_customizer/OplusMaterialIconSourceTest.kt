@@ -16,6 +16,7 @@ class OplusMaterialIconSourceTest {
         for (pkg in listOf(
             "com.android.chrome",
             "com.google.android.apps.maps",
+            "com.google.android.apps.photos",
             "com.android.vending",
             "com.google.android.gms",
             "com.google.android.googlequicksearchbox",
