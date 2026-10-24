@@ -517,7 +517,14 @@ class ThemedIcons : XposedModule() {
         val sourceSig = buildSourceSignature(original)
         // Distinguish package activities and keep this experiment out of older
         // generated-icon bitmap cache entries.
-        val key = "$pkg|${component?.flattenToString()}|$night|$isShortcut|$sourceSig|oem-v2"
+        // Third-party icons use the *identical* cache key as the proven
+        // non-experimental build. Only selected OEM packages use a separate key.
+        val eligible = !isShortcut && OplusMaterialIconSource.isEligiblePackage(pkg)
+        val key = if (eligible) {
+            "$pkg|${component?.flattenToString()}|$night|$isShortcut|$sourceSig|material-file-v3"
+        } else {
+            "$pkg|$night|$isShortcut|$sourceSig"
+        }
 
         if (failedKeys.get(key) == true) {
             return null
@@ -535,7 +542,7 @@ class ThemedIcons : XposedModule() {
         // The OEM helper reads ColorOS' actual monochrome asset, not the
         // generic AdaptiveIconDrawable#monochrome which caused scale changes
         // in the first experiment. Resolve only on icon bitmap cache miss.
-        val oem = if (!isShortcut && component != null) {
+        val oem = if (eligible && component != null) {
             OplusMaterialIconSource.load(context, component)
         } else null
         val bitmap = generateRawThemedBitmap(context, original, isShortcut, oem)
