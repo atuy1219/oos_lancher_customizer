@@ -77,6 +77,7 @@ class OplusIconSurfaceGuard : XposedModule() {
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
+        moduleLog("injected launcher process; ColorOS16 IconSurface guard initializing")
 
         runCatching {
             installHooks(param.defaultClassLoader)
@@ -155,6 +156,15 @@ class OplusIconSurfaceGuard : XposedModule() {
             val args = chain.args.toTypedArray()
             wrapV16Callback(chain.thisObject, args)
             chain.proceed(args)
+        }
+
+        // Verified in the supplied launcher APK (versionName 16.6.20):
+        // IconViewManager#release() is a real declared method. Drop the
+        // short-lived per-manager callback target on release to avoid stale
+        // overrides being replayed on a reused IconViewManager.
+        hookAllNamedMethods(managerClass, "release", "surface-v16-release") { chain ->
+            chain.thisObject?.let(callbackTargets::remove)
+            chain.proceed()
         }
 
         moduleLog("hooked IconViewManager fetch/async/getIcon callback/release")
@@ -428,9 +438,13 @@ class OplusIconSurfaceGuard : XposedModule() {
     }
 
     private fun moduleLog(msg: String, throwable: Throwable? = null) {
+        // Two independent channels: LSPosed's module log and Android logcat.
+        // A blank grep of modules_*.log alone is not proof that the hook failed.
         if (throwable == null) {
+            Log.i(TAG, msg)
             log(Log.INFO, TAG, msg)
         } else {
+            Log.e(TAG, msg, throwable)
             log(Log.ERROR, TAG, msg, throwable)
         }
     }
