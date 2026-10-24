@@ -195,18 +195,33 @@ internal object ThemedIconPolicy {
         return isMatchingHomeFolder(childContainer, folderId, parentContainer)
     }
 
-    // Package names alone collide between activities, profiles and deep shortcuts.
+    // Launcher mutates Intent flags/extras/sourceBounds on each launch, including
+    // anim_from_item_click and allow_pre_start. Never include Intent#toUri() in the
+    // cache key or the same home icon becomes a cache MISS during app close.
+    //
+    // A persisted item ID uniquely identifies a workspace item. Component,
+    // profile and shortcut ID protect against recycled IDs and shortcut changes.
+    internal fun stableItemKey(
+        id: Any?,
+        user: Any?,
+        itemType: Any?,
+        component: String?,
+        shortcutId: String?
+    ): String = listOf(id, user, itemType, component, shortcutId).joinToString("|")
+
     fun itemKey(item: Any): String {
+        val intent = (call(item, "getIntent") as? Intent)
+            ?: (read(item, "intent") as? Intent)
         val component = (call(item, "getTargetComponent") as? ComponentName)
             ?: (read(item, "componentName") as? ComponentName)
             ?: (call(item, "getMTargetComponent") as? ComponentName)
-        val intent = (call(item, "getIntent") as? Intent)
-            ?: (read(item, "intent") as? Intent)
-        return listOf(
+            ?: intent?.component
+        return stableItemKey(
             read(item, "id"), read(item, "user"), read(item, "itemType"),
-            component?.flattenToString(), call(item, "getDeepShortcutId"),
-            intent?.toUri(0)
-        ).joinToString("|")
+            component?.flattenToString(),
+            (call(item, "getDeepShortcutId") as? String)
+                ?: (read(item, "deepShortcutId") as? String)
+        )
     }
 
     private fun read(owner: Any, name: String): Any? {
