@@ -93,7 +93,7 @@ class OplusIconSurfaceGuard : XposedModule() {
             ) { chain ->
                 val args = chain.args.toTypedArray()
                 val result = chain.proceed(args)
-                captureThemedPreviewResult(args)
+                captureThemedPreviewResult(chain.thisObject, args)
                 result
             }
             moduleLog("hooked PreviewItemManager#setDrawable exact themed capture")
@@ -168,11 +168,11 @@ class OplusIconSurfaceGuard : XposedModule() {
      * At PRIORITY_HIGHEST we wrap ThemedIcons. Its after-original mutation is therefore
      * complete when chain.proceed() returns here.
      */
-    private fun captureThemedPreviewResult(args: Array<Any?>) {
+    private fun captureThemedPreviewResult(owner: Any?, args: Array<Any?>) {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeItem(itemInfo)) return
+        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val themed = readField(previewParams, "drawable") as? BitmapDrawable ?: return
         rememberExactThemed(itemInfo, themed, "preview")
