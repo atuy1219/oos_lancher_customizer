@@ -102,26 +102,6 @@ class ThemedIcons : XposedModule() {
         }
         moduleLog("hooked BubbleTextView#setIcon")
 
-        // Direct CompoundDrawable updates bypass setIcon (e.g. pressed-state /
-        // long-press popup rebinds). Preserve the exact themed snapshot there too.
-        hookAllNamedMethods(
-            bubbleTextViewClass, "applyCompoundDrawables", "bubble-compound"
-        ) { chain ->
-            val args = chain.args.toTypedArray()
-            beforeBubbleApplyCompound(chain.thisObject, args)
-            chain.proceed(args)
-        }
-        moduleLog("hooked BubbleTextView#applyCompoundDrawables")
-
-        // 16.6.20 can switch a BubbleTextView drawable directly while the
-        // long-press popup is active, without calling setIcon again. Check the
-        // icon at the actual drawing sink, not only at bind/pop-up time.
-        hookAllNamedMethods(bubbleTextViewClass, "drawIcon", "bubble-drawIcon") { chain ->
-            restoreBeforeBubbleDraw(chain.thisObject)
-            chain.proceed()
-        }
-        moduleLog("hooked BubbleTextView#drawIcon for popup rebind recovery")
-
         runCatching {
             val previewManagerClass = Class.forName(PREVIEW_MANAGER_CLASS, false, classLoader)
             hookAllNamedMethods(previewManagerClass, "setDrawable", "folder-setDrawable") { chain ->
