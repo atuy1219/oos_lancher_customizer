@@ -523,7 +523,7 @@ class ThemedIcons : XposedModule() {
             PixelLauncherThemedAssets.hasArtwork(pkg)
         val key = when {
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
-            hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907|${component?.className}"
+            hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
             else -> "$pkg|$night|$isShortcut|$sourceSig"
         }
 
@@ -675,9 +675,12 @@ class ThemedIcons : XposedModule() {
             legacyBitmap != null -> (
                 size * Oos15MonochromeAssets.glyphScale(pkg)
             ).roundToInt()
-            // Pixel Launcher vectors are authored in a 36x36 viewport and are
-            // already tightly framed. Scaling them 1.5x would clip their edges.
-            pixelBitmap != null -> size
+            // Both Pixel and Oplus IconProvider pad theme fallback vectors
+            // by 20% on each side. AdaptiveIconDrawable's extra foreground
+            // inset is compensated at render time: net 60% of this circle.
+            pixelBitmap != null -> (
+                size * PixelLauncherThemedAssets.GLYPH_SCALE
+            ).roundToInt()
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
             isAdaptive -> (size * 1.50f).toInt()
