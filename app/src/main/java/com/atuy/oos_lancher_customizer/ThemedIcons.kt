@@ -322,8 +322,13 @@ class ThemedIcons : XposedModule() {
 
     private fun restoreIconAfterPopup(owner: Any?, stage: String) {
         val iconView = (readField(owner, "mOriginalIcon")
-            ?: owner?.let { invokeNoArg(it, "getOriginalIcon") }) as? View ?: return
+            ?: owner?.let { invokeNoArg(it, "getOriginalIcon") }) as? View
+        if (iconView == null) {
+            moduleLog("popup $stage: original icon unavailable")
+            return
+        }
         if (stage == "closeComplete") {
+            moduleLog("popup close: scheduling forced icon refresh")
             // OEM popup animations may mutate an already-themed Drawable in
             // place (alpha/colorFilter). Restoring only when the Drawable
             // instance changes misses that case. Force a clean snapshot at the
