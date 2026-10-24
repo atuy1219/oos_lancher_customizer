@@ -22,6 +22,7 @@ internal object ThemedIconPolicy {
     private const val DISPLAY_FOLDER = 2
     private const val CONTAINER_DESKTOP = -100
     private const val CONTAINER_HOTSEAT = -101
+    private const val CONTAINER_HOTSEAT_PREDICTION = -103
     private const val BIG_FOLDER_ITEM_VIEW =
         "com.android.launcher3.folder.big.BigFolderItemIcon"
 
@@ -33,14 +34,25 @@ internal object ThemedIconPolicy {
 
     fun isThemedDrawable(drawable: Drawable): Boolean = themedDrawables[drawable] == true
 
-    // Positive containers identify folder IDs; other negative containers belong to
-    // special launcher surfaces (all apps, drawer categories, widgets, search, etc.).
+    // Positive containers identify folder IDs. -103 is Oplus' predicted Hotseat,
+    // unlike -102 (the prediction surface outside the dock).
+    internal fun isHotseatContainer(container: Int?): Boolean =
+        container == CONTAINER_HOTSEAT || container == CONTAINER_HOTSEAT_PREDICTION
+
     internal fun isHomeContainer(container: Int?): Boolean =
-        container == CONTAINER_DESKTOP || container == CONTAINER_HOTSEAT ||
+        container == CONTAINER_DESKTOP || isHotseatContainer(container) ||
             (container != null && container > 0)
 
     internal fun isHomeDisplay(display: Int?): Boolean =
         display == DISPLAY_WORKSPACE || display == DISPLAY_FOLDER
+
+    // Oplus dock icons may use non-workspace BubbleTextView display modes.
+    // In that case, the actual Hotseat ancestry is more reliable than mDisplay.
+    internal fun isEligibleDisplay(display: Int?, container: Int?, onHotseat: Boolean): Boolean {
+        if (isHotseatContainer(container) && onHotseat && display != null) return true
+        if (container == CONTAINER_HOTSEAT_PREDICTION) return false
+        return isHomeDisplay(display)
+    }
 
     fun shouldThemeItem(item: Any?): Boolean {
         if (item == null) return false
@@ -73,10 +85,30 @@ internal object ThemedIconPolicy {
         ).any { name.contains(it) }
     }
 
-    private fun hasExcludedAncestor(view: View): Boolean {
+    // Check the real View hierarchy, not a class-name substring of the icon itself.
+    private fun hasHotseatAncestor(view: View): Boolean {
         var current: View? = view
         while (current != null) {
-            if (isExcludedSurfaceClass(current.javaClass.name)) return true
+            var cls: Class<*>? = current.javaClass
+            while (cls != null) {
+                if (cls.name == "com.android.launcher3.Hotseat" ||
+                    cls.name == "com.android.launcher3.OplusHotseat") return true
+                cls = cls.superclass
+            }
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun hasExcludedAncestor(view: View): Boolean {
+        val onHotseat = hasHotseatAncestor(view)
+        var current: View? = view
+        while (current != null) {
+            val className = current.javaClass.name
+            val hotseatPrediction = onHotseat &&
+                (className.contains("hotseatprediction", ignoreCase = true) ||
+                    className.contains("hybridhotseat", ignoreCase = true))
+            if (!hotseatPrediction && isExcludedSurfaceClass(className)) return true
             current = current.parent as? View
         }
         return false
@@ -85,6 +117,7 @@ internal object ThemedIconPolicy {
     fun shouldThemeView(view: View?, item: Any?): Boolean {
         if (view == null || !shouldThemeItem(item)) return false
         val display = (read(view, "mDisplay") as? Number)?.toInt()
+        val container = (read(item!!, "container") as? Number)?.toInt()
         if (display == null) {
             if (view.javaClass.name != BIG_FOLDER_ITEM_VIEW) return false
             // BigFolderItemIcon can live outside the ordinary View parent hierarchy.
@@ -94,7 +127,7 @@ internal object ThemedIconPolicy {
             if (!isHomeContainer((parentInfo?.let { read(it, "container") } as? Number)?.toInt())) {
                 return false
             }
-        } else if (!isHomeDisplay(display)) {
+        } else if (!isEligibleDisplay(display, container, hasHotseatAncestor(view))) {
             return false
         }
         return !hasExcludedAncestor(view)
