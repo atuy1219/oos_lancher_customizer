@@ -2,6 +2,8 @@ package com.atuy.oos_lancher_customizer
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
+import kotlin.math.roundToInt
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -9,6 +11,15 @@ import java.util.Base64
 import java.util.zip.InflaterInputStream
 
 class PixelLauncherThemedAssetsTest {
+    @Test
+    fun pixelAndOplusIconProviderTwentyPercentInsetsGiveSixtyPercentGlyphCanvas() {
+        assertEquals(0.20f, PixelLauncherThemedAssets.GLYPH_INSET_FRACTION, 0f)
+        assertEquals(0.60f, PixelLauncherThemedAssets.GLYPH_SCALE, 0f)
+        assertEquals(115, (192 * PixelLauncherThemedAssets.GLYPH_SCALE).roundToInt())
+        assertEquals(38, (192 - 115) / 2)
+        assertEquals(1.50f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
+    }
+
     @Test
     fun allElevenPixel17EntriesHaveExactPackageMatches() {
         for (pkg in listOf(
