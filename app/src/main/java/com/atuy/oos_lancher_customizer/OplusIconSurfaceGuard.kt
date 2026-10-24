@@ -157,11 +157,6 @@ class OplusIconSurfaceGuard : XposedModule() {
             chain.proceed(args)
         }
 
-        hookAllNamedMethods(managerClass, "release", "surface-v16-release") { chain ->
-            chain.thisObject?.let(callbackTargets::remove)
-            chain.proceed()
-        }
-
         moduleLog("hooked IconViewManager fetch/async/getIcon callback/release")
 
         hookAllNamedMethods(recordClass, "onIconLoaded", "surface-final-sink") { chain ->
