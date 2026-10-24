@@ -141,7 +141,7 @@ class OplusFloatingIconGuard : XposedModule() {
 
         return try {
             val result = chain.proceed(args)
-            val patched = patchLoadResult(loadResult, originalView, itemInfo)
+            patchLoadResult(loadResult, originalView, itemInfo)
 
             if (pendingCallback != null) {
                 writeField(loadResult, "onIconLoaded", pendingCallback)
@@ -149,10 +149,6 @@ class OplusFloatingIconGuard : XposedModule() {
                 writeField(loadResult, "onIconLoaded", null)
             }
 
-            moduleLog(
-                "oplus result ${if (patched) "patched" else "unchanged"} " +
-                    "pkg=${resolvePackageName(itemInfo)} callback=${pendingCallback != null}"
-            )
             result
         } catch (error: Throwable) {
             if (pendingCallback != null && readField(loadResult, "onIconLoaded") == null) {
@@ -177,9 +173,7 @@ class OplusFloatingIconGuard : XposedModule() {
         // only in the before-hook can miss the drawable's final rendering sink.
         rememberClipOverride(owner, originalView, itemInfo)
         val loadResult = readField(owner, "mIconLoadResult") ?: return
-        if (patchLoadResult(loadResult, originalView, itemInfo)) {
-            moduleLog("local result patched pkg=${resolvePackageName(itemInfo)}")
-        }
+        patchLoadResult(loadResult, originalView, itemInfo)
     }
 
     private fun rememberClipOverride(owner: Any?, originalView: View?, itemInfo: Any?) {
@@ -193,18 +187,12 @@ class OplusFloatingIconGuard : XposedModule() {
         val currentIcon = themedIconForTarget(originalView, itemInfo)
         if (currentIcon == null) {
             clipIconOverrides.remove(clipView)
-            moduleLog("floating clip snapshot MISS view=${originalView.javaClass.simpleName} " +
-                "item=${ThemedIconPolicy.itemKey(itemInfo)}")
             return
         }
 
         val snapshot = cloneDrawable(currentIcon, originalView.context)
         snapshot.bounds = currentIcon.bounds
         clipIconOverrides[clipView] = snapshot
-        moduleLog(
-            "clip override armed pkg=${resolvePackageName(itemInfo)} " +
-                "drawable=${currentIcon.javaClass.simpleName}"
-        )
     }
 
     private fun beforeClipSetIcon(owner: Any?, args: Array<Any?>) {
@@ -217,10 +205,6 @@ class OplusFloatingIconGuard : XposedModule() {
         replacement.bounds = originalArg?.bounds ?: override.bounds
         args[0] = replacement
 
-        moduleLog(
-            "clip sink forced ${owner.javaClass.simpleName}: " +
-                "${originalArg?.javaClass?.simpleName} -> ${replacement.javaClass.simpleName}"
-        )
     }
 
     private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any): Boolean {
@@ -248,8 +232,6 @@ class OplusFloatingIconGuard : XposedModule() {
         // For FlexibleFolderIcon there is no BubbleTextView#getIcon. Use the exact
         // themed preview item cached for this app (never a package-only match).
         val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: return null
-        moduleLog("folder return snapshot pkg=${resolvePackageName(itemInfo)} " +
-            "view=${view.javaClass.simpleName}")
         return state.newDrawable(view.context.resources).mutate()
     }
 
@@ -272,30 +254,6 @@ class OplusFloatingIconGuard : XposedModule() {
             return
         }
         context.mainExecutor.execute(callback)
-    }
-
-    private fun resolvePackageName(itemInfo: Any): String? {
-        (readField(itemInfo, "componentName") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getTargetComponent") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getMTargetComponent") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (readField(itemInfo, "packageName") as? String)
-            ?.takeIf { it.contains('.') }
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getTargetPackage") as? String)
-            ?.takeIf { it.contains('.') }
-            ?.let { return it }
-
-        return null
     }
 
     private fun findField(owner: Any, name: String): Field? {
