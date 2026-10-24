@@ -15,7 +15,7 @@ import java.util.WeakHashMap
  * search results and widget-driven launches. A package name or an app-like ItemInfo is not
  * sufficient to decide whether a return animation may use a themed icon.
  *
- * Verified against OplusLauncher 16.6.17 and System Launcher 17.3.12 DEX constants.
+ * Verified against OplusLauncher 16.6.20 and System Launcher 17.3.12 DEX constants.
  */
 internal object ThemedIconPolicy {
     private const val DISPLAY_WORKSPACE = 0
@@ -181,8 +181,8 @@ internal object ThemedIconPolicy {
     }
 
     /**
-     * New IconDrawableLoader uses a FolderIcon as the clicked view when returning an
-     * app to the folder preview. The view's tag is the FolderInfo, not the app ItemInfo.
+     * IconSurface may use FolderIcon as the return target of an app inside a
+     * home folder. The view's tag is FolderInfo, not the app's ItemInfo.
      * Accept that indirection only when the folder's database ID equals the app's
      * positive container ID and the folder itself belongs to the home workspace.
      */
