@@ -31,6 +31,8 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.nio.ByteBuffer
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -56,6 +58,16 @@ class ThemedIcons : XposedModule() {
     private val cacheHits = AtomicLong(0)
     private val cacheMiss = AtomicLong(0)
     private val failedKeys = object : LruCache<String, Boolean>(1024) {}
+
+    // getDrawableByIndex may run every frame. Do not allocate a new themed
+    // Drawable from ConstantState on every draw.
+    private data class BigFolderCacheEntry(
+        val original: Drawable,
+        val itemKey: String,
+        val themed: Drawable
+    )
+    private val bigFolderViewCache =
+        Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
     @Volatile
     private var hooksInstalled = false
 
@@ -326,6 +338,12 @@ class ThemedIcons : XposedModule() {
             ThemedIconPolicy.rememberDrawable(source, info)
             return source
         }
+        val key = ThemedIconPolicy.itemKey(info)
+        val cached = bigFolderViewCache[view]
+        if (cached != null && cached.original === source && cached.itemKey == key) {
+            cached.themed.bounds = source.bounds
+            return cached.themed
+        }
 
         // A BigFolderItemIcon getter can be called during animations. Prefer
         // the exact themed snapshot already recorded for the item rather than
@@ -335,6 +353,7 @@ class ThemedIcons : XposedModule() {
             val restored = existing.newDrawable(view.resources).mutate()
             restored.bounds = source.bounds
             ThemedIconPolicy.rememberDrawable(restored, info)
+            bigFolderViewCache[view] = BigFolderCacheEntry(source, key, restored)
             return restored
         }
 
@@ -344,6 +363,7 @@ class ThemedIcons : XposedModule() {
         val themed = themedDrawable(context, pkg, originalSource, isShortcut) ?: return null
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
+        bigFolderViewCache[view] = BigFolderCacheEntry(source, key, themed)
         moduleLog("BigFolderItemIcon snapshot CREATED item=" +
             ThemedIconPolicy.itemKey(info) + " drawable=" +
             source.javaClass.simpleName)
