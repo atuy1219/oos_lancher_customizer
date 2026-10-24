@@ -1,6 +1,5 @@
 package com.atuy.oos_lancher_customizer
 
-import android.content.ComponentName
 import android.content.Context
 import android.graphics.drawable.Drawable
 import android.util.Log
@@ -207,10 +206,10 @@ class OplusFloatingIconGuard : XposedModule() {
 
     }
 
-    private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any): Boolean {
-        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return false
-        val view = originalView ?: return false
-        val currentIcon = themedIconForTarget(view, itemInfo) ?: return false
+    private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any) {
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
+        val view = originalView ?: return
+        val currentIcon = themedIconForTarget(view, itemInfo) ?: return
 
         val drawable = cloneDrawable(currentIcon, view.context)
         drawable.bounds = currentIcon.bounds
@@ -220,7 +219,6 @@ class OplusFloatingIconGuard : XposedModule() {
         btvDrawable.bounds = currentIcon.bounds
         runCatching { writeField(loadResult, "btvDrawable", btvDrawable) }
         runCatching { writeField(loadResult, "isThemed", true) }
-        return true
     }
 
     private fun themedIconForTarget(view: View, itemInfo: Any): Drawable? {
