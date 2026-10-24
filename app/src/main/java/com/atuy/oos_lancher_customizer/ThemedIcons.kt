@@ -134,7 +134,7 @@ class ThemedIcons : XposedModule() {
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
-        ThemedIconPolicy.rememberDrawable(themed)
+        ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
 
@@ -153,7 +153,7 @@ class ThemedIcons : XposedModule() {
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
-        ThemedIconPolicy.rememberDrawable(themed)
+        ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         writeField(previewParams, "drawable", themed)
 
@@ -174,7 +174,7 @@ class ThemedIcons : XposedModule() {
         val isShortcut = isShortcutLikeItem(itemInfo)
         val source = resolveBestSourceDrawable(context, itemInfo, drawable)
         val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
-        ThemedIconPolicy.rememberDrawable(themed)
+        ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
 
