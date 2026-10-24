@@ -261,6 +261,12 @@ class OplusFloatingIconGuard : XposedModule() {
     private fun cloneDrawable(drawable: Drawable, context: Context): Drawable {
         return runCatching {
             drawable.constantState?.newDrawable(context.resources)?.mutate()
+                ?.apply {
+                    // Do not inherit a dimmed folder-preview state when
+                    // preparing a floating-icon animation drawable.
+                    alpha = 255
+                    clearColorFilter()
+                }
         }.getOrNull() ?: drawable
     }
 
