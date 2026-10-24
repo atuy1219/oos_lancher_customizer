@@ -168,7 +168,7 @@ class ThemedIcons : XposedModule() {
         val pkg = resolvePackageName(itemInfo) ?: return
         val originalView = readField(owner, "mOriginalIcon") as? View
         if (!shouldApplyToPackage(pkg) ||
-            !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return
+            !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
 
         val context = view.context.applicationContext ?: return
         val isShortcut = isShortcutLikeItem(itemInfo)
