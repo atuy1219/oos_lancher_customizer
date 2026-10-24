@@ -518,7 +518,7 @@ class ThemedIcons : XposedModule() {
         val hasLegacy = !isShortcut && Oos15MonochromeAssets.hasArtwork(context, pkg)
         // Preserve original key and rendering for packages absent in the OOS15 archive.
         val key = if (hasLegacy) {
-            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v1|${component?.className}"
+            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v2-scale112|${component?.className}"
         } else {
             "$pkg|$night|$isShortcut|$sourceSig"
         }
@@ -661,7 +661,13 @@ class ThemedIcons : XposedModule() {
             }
 
         val baseIconSize = when {
-            legacyBitmap != null -> size  // OEM PNG has its own original internal spacing
+            // The OOS15 PNG canvas contains substantial intrinsic padding.
+            // Zoom only its foreground (not the circular theme background).
+            // ConsumerIR's glyph approaches the lower PNG edge; a smaller
+            // scale avoids clipping its off-center design.
+            legacyBitmap != null -> (
+                size * if (pkg == "com.oplus.consumerIRApp") 1.08f else 1.12f
+            ).roundToInt()
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
             isAdaptive -> (size * 1.50f).toInt()
