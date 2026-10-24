@@ -15,7 +15,7 @@ import java.util.WeakHashMap
  * search results and widget-driven launches. A package name or an app-like ItemInfo is not
  * sufficient to decide whether a return animation may use a themed icon.
  *
- * Verified against OplusLauncher 16.6.17 and System Launcher 17.3.12 DEX constants.
+ * Verified against OplusLauncher 16.6.20 and System Launcher 17.3.12 DEX constants.
  */
 internal object ThemedIconPolicy {
     private const val DISPLAY_WORKSPACE = 0
@@ -28,9 +28,37 @@ internal object ThemedIconPolicy {
 
     private val themedDrawables = Collections.synchronizedMap(WeakHashMap<Drawable, Boolean>())
 
-    fun rememberDrawable(drawable: Drawable) {
+    // Shared between ThemedIcons, FloatingIconGuard and IconSurfaceGuard.
+    // Key by the complete launcher item identity, never the package name alone.
+    // Bounded to avoid keeping an entire app drawer worth of BitmapDrawable states.
+    private val themedStates = Collections.synchronizedMap(
+        object : LinkedHashMap<String, Drawable.ConstantState>(128, 0.75f, true) {
+            override fun removeEldestEntry(
+                eldest: MutableMap.MutableEntry<String, Drawable.ConstantState>?
+            ): Boolean = size > 128
+        }
+    )
+
+    fun rememberDrawable(drawable: Drawable, item: Any? = null) {
         themedDrawables[drawable] = true
+        if (item != null && shouldThemeItem(item)) {
+            drawable.constantState?.let { state ->
+                // Folder preview rendering changes alpha on its Drawable.
+                // Cache a *detached* ConstantState so a dimmed frame cannot
+                // overwrite the icon used by the app-close animation.
+                val cleanState = runCatching {
+                    state.newDrawable().mutate().apply {
+                        alpha = 255
+                        clearColorFilter()
+                    }.constantState
+                }.getOrNull() ?: state
+                synchronized(themedStates) { themedStates[itemKey(item)] = cleanState }
+            }
+        }
     }
+
+    fun themedStateFor(item: Any): Drawable.ConstantState? =
+        synchronized(themedStates) { themedStates[itemKey(item)] }
 
     fun isThemedDrawable(drawable: Drawable): Boolean = themedDrawables[drawable] == true
 
@@ -152,18 +180,57 @@ internal object ThemedIconPolicy {
         return shouldThemeItem(target) && itemKey(target) == itemKey(item!!)
     }
 
-    // Package names alone collide between activities, profiles and deep shortcuts.
+    /**
+     * IconSurface may use FolderIcon as the return target of an app inside a
+     * home folder. The view's tag is FolderInfo, not the app's ItemInfo.
+     * Accept that indirection only when the folder's database ID equals the app's
+     * positive container ID and the folder itself belongs to the home workspace.
+     */
+    internal fun isMatchingHomeFolder(
+        itemContainer: Long?, folderId: Long?, folderContainer: Int?
+    ): Boolean =
+        itemContainer != null && itemContainer > 0L && itemContainer == folderId &&
+            isHomeContainer(folderContainer)
+
+    fun shouldThemeSurfaceTarget(view: View?, item: Any?): Boolean {
+        if (shouldThemeAnimation(view, item)) return true
+        if (view == null || !shouldThemeItem(item)) return false
+        if (hasExcludedAncestor(view)) return false
+        if (!view.javaClass.name.contains("FolderIcon")) return false
+        val childContainer = (read(item!!, "container") as? Number)?.toLong() ?: return false
+        val folderInfo = call(view, "getInfo") ?: read(view, "mInfo") ?: view.tag ?: return false
+        val folderId = (read(folderInfo, "id") as? Number)?.toLong()
+        val parentContainer = (read(folderInfo, "container") as? Number)?.toInt()
+        return isMatchingHomeFolder(childContainer, folderId, parentContainer)
+    }
+
+    // Launcher mutates Intent flags/extras/sourceBounds on each launch, including
+    // anim_from_item_click and allow_pre_start. Never include Intent#toUri() in the
+    // cache key or the same home icon becomes a cache MISS during app close.
+    //
+    // A persisted item ID uniquely identifies a workspace item. Component,
+    // profile and shortcut ID protect against recycled IDs and shortcut changes.
+    internal fun stableItemKey(
+        id: Any?,
+        user: Any?,
+        itemType: Any?,
+        component: String?,
+        shortcutId: String?
+    ): String = listOf(id, user, itemType, component, shortcutId).joinToString("|")
+
     fun itemKey(item: Any): String {
+        val intent = (call(item, "getIntent") as? Intent)
+            ?: (read(item, "intent") as? Intent)
         val component = (call(item, "getTargetComponent") as? ComponentName)
             ?: (read(item, "componentName") as? ComponentName)
             ?: (call(item, "getMTargetComponent") as? ComponentName)
-        val intent = (call(item, "getIntent") as? Intent)
-            ?: (read(item, "intent") as? Intent)
-        return listOf(
+            ?: intent?.component
+        return stableItemKey(
             read(item, "id"), read(item, "user"), read(item, "itemType"),
-            component?.flattenToString(), call(item, "getDeepShortcutId"),
-            intent?.toUri(0)
-        ).joinToString("|")
+            component?.flattenToString(),
+            (call(item, "getDeepShortcutId") as? String)
+                ?: (read(item, "deepShortcutId") as? String)
+        )
     }
 
     private fun read(owner: Any, name: String): Any? {

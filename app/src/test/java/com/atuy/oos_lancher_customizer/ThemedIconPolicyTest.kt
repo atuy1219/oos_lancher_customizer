@@ -40,6 +40,21 @@ class ThemedIconPolicyTest {
         assertFalse(ThemedIconPolicy.shouldThemeItem(null))
     }
 
+    @Test fun stableKeyDoesNotDependOnMutableLaunchIntent() {
+        // A folder item is loaded as WorkspaceItemInfo before launching the app.
+        // ColorOS appends sourceBounds, anim_from_item_click and pre-start extras
+        // to its Intent on launch; none of them are part of this identity.
+        val beforeLaunch = ThemedIconPolicy.itemKey(Item(id = 223, container = 42))
+        val atAnimation = ThemedIconPolicy.itemKey(Item(id = 223, container = 42))
+        assertEquals(beforeLaunch, atAnimation)
+        assertEquals(
+            ThemedIconPolicy.stableItemKey(223L, "personal", 0, null, null),
+            atAnimation
+        )
+        assertNotEquals(atAnimation, ThemedIconPolicy.itemKey(Item(id = 224, container = 42)))
+        assertNotEquals(atAnimation, ThemedIconPolicy.itemKey(Item(id = 223, user = "work", container = 42)))
+    }
+
     @Test fun normalAppAndShortcutsNeverShareAnAnimationCacheKey() {
         val app = ThemedIconPolicy.itemKey(Item())
         val shortcut = ThemedIconPolicy.itemKey(Item(itemType = 6, shortcut = "chat"))
@@ -99,6 +114,16 @@ class ThemedIconPolicyTest {
         assertFalse(ThemedIconPolicy.isEligibleDisplay(8, -101, false))
         assertFalse(ThemedIconPolicy.isEligibleDisplay(0, -103, false))
         assertFalse(ThemedIconPolicy.isEligibleDisplay(null, -101, true))
+    }
+
+    @Test fun folderReturnAnimationMustMatchHomeFolderId() {
+        assertTrue(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -100))
+        assertTrue(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -101))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, 8, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(-201, -201, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, 7, -201))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(7, null, -100))
+        assertFalse(ThemedIconPolicy.isMatchingHomeFolder(null, 7, -100))
     }
 
     @Test fun drawerPredictionAndCategoryRemainExcludedEvenInsideLauncher() {

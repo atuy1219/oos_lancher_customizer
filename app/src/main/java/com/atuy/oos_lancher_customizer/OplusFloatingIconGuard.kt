@@ -1,6 +1,5 @@
 package com.atuy.oos_lancher_customizer
 
-import android.content.ComponentName
 import android.content.Context
 import android.graphics.drawable.Drawable
 import android.util.Log
@@ -127,7 +126,8 @@ class OplusFloatingIconGuard : XposedModule() {
 
         // getOplusIconResult is static; its owner is null. The local path arms the clip.
 
-        if (loadResult == null || itemInfo == null || !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) {
+        if (loadResult == null || itemInfo == null ||
+            !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) {
             return chain.proceed(args)
         }
 
@@ -140,7 +140,7 @@ class OplusFloatingIconGuard : XposedModule() {
 
         return try {
             val result = chain.proceed(args)
-            val patched = patchLoadResult(loadResult, originalView, itemInfo)
+            patchLoadResult(loadResult, originalView, itemInfo)
 
             if (pendingCallback != null) {
                 writeField(loadResult, "onIconLoaded", pendingCallback)
@@ -148,10 +148,6 @@ class OplusFloatingIconGuard : XposedModule() {
                 writeField(loadResult, "onIconLoaded", null)
             }
 
-            moduleLog(
-                "oplus result ${if (patched) "patched" else "unchanged"} " +
-                    "pkg=${resolvePackageName(itemInfo)} callback=${pendingCallback != null}"
-            )
             result
         } catch (error: Throwable) {
             if (pendingCallback != null && readField(loadResult, "onIconLoaded") == null) {
@@ -170,24 +166,25 @@ class OplusFloatingIconGuard : XposedModule() {
     private fun afterFetchAndFillLocalIcon(owner: Any?, args: Array<Any?>) {
         val originalView = args.getOrNull(1) as? View ?: return
         val itemInfo = args.getOrNull(2) ?: return
-        if (!ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
 
+        // The clip view may be created by fetchAndFillLocalIcon itself, so arming
+        // only in the before-hook can miss the drawable's final rendering sink.
+        rememberClipOverride(owner, originalView, itemInfo)
         val loadResult = readField(owner, "mIconLoadResult") ?: return
-        if (patchLoadResult(loadResult, originalView, itemInfo)) {
-            moduleLog("local result patched pkg=${resolvePackageName(itemInfo)}")
-        }
+        patchLoadResult(loadResult, originalView, itemInfo)
     }
 
     private fun rememberClipOverride(owner: Any?, originalView: View?, itemInfo: Any?) {
         val clipView = readField(owner, "mClipIconView") ?: return
 
-        if (itemInfo == null || !ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo) || originalView == null) {
+        if (itemInfo == null || !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo) || originalView == null) {
             clipIconOverrides.remove(clipView)
             return
         }
 
-        val currentIcon = invokeNoArg(originalView, "getIcon") as? Drawable
-        if (currentIcon == null || !ThemedIconPolicy.isThemedDrawable(currentIcon)) {
+        val currentIcon = themedIconForTarget(originalView, itemInfo)
+        if (currentIcon == null) {
             clipIconOverrides.remove(clipView)
             return
         }
@@ -195,10 +192,6 @@ class OplusFloatingIconGuard : XposedModule() {
         val snapshot = cloneDrawable(currentIcon, originalView.context)
         snapshot.bounds = currentIcon.bounds
         clipIconOverrides[clipView] = snapshot
-        moduleLog(
-            "clip override armed pkg=${resolvePackageName(itemInfo)} " +
-                "drawable=${currentIcon.javaClass.simpleName}"
-        )
     }
 
     private fun beforeClipSetIcon(owner: Any?, args: Array<Any?>) {
@@ -211,17 +204,12 @@ class OplusFloatingIconGuard : XposedModule() {
         replacement.bounds = originalArg?.bounds ?: override.bounds
         args[0] = replacement
 
-        moduleLog(
-            "clip sink forced ${owner.javaClass.simpleName}: " +
-                "${originalArg?.javaClass?.simpleName} -> ${replacement.javaClass.simpleName}"
-        )
     }
 
-    private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any): Boolean {
-        if (!ThemedIconPolicy.shouldThemeAnimation(originalView, itemInfo)) return false
-        val view = originalView ?: return false
-        val currentIcon = invokeNoArg(view, "getIcon") as? Drawable ?: return false
-        if (!ThemedIconPolicy.isThemedDrawable(currentIcon)) return false
+    private fun patchLoadResult(loadResult: Any, originalView: View?, itemInfo: Any) {
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
+        val view = originalView ?: return
+        val currentIcon = themedIconForTarget(view, itemInfo) ?: return
 
         val drawable = cloneDrawable(currentIcon, view.context)
         drawable.bounds = currentIcon.bounds
@@ -231,12 +219,29 @@ class OplusFloatingIconGuard : XposedModule() {
         btvDrawable.bounds = currentIcon.bounds
         runCatching { writeField(loadResult, "btvDrawable", btvDrawable) }
         runCatching { writeField(loadResult, "isThemed", true) }
-        return true
+    }
+
+    private fun themedIconForTarget(view: View, itemInfo: Any): Drawable? {
+        if (!ThemedIconPolicy.shouldThemeSurfaceTarget(view, itemInfo)) return null
+        val visible = invokeNoArg(view, "getIcon") as? Drawable
+        if (visible != null && ThemedIconPolicy.isThemedDrawable(visible)) {
+            return visible
+        }
+        // For FlexibleFolderIcon there is no BubbleTextView#getIcon. Use the exact
+        // themed preview item cached for this app (never a package-only match).
+        val state = ThemedIconPolicy.themedStateFor(itemInfo) ?: return null
+        return state.newDrawable(view.context.resources).mutate()
     }
 
     private fun cloneDrawable(drawable: Drawable, context: Context): Drawable {
         return runCatching {
             drawable.constantState?.newDrawable(context.resources)?.mutate()
+                ?.apply {
+                    // Do not inherit a dimmed folder-preview state when
+                    // preparing a floating-icon animation drawable.
+                    alpha = 255
+                    clearColorFilter()
+                }
         }.getOrNull() ?: drawable
     }
 
@@ -247,30 +252,6 @@ class OplusFloatingIconGuard : XposedModule() {
             return
         }
         context.mainExecutor.execute(callback)
-    }
-
-    private fun resolvePackageName(itemInfo: Any): String? {
-        (readField(itemInfo, "componentName") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getTargetComponent") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getMTargetComponent") as? ComponentName)
-            ?.packageName
-            ?.let { return it }
-
-        (readField(itemInfo, "packageName") as? String)
-            ?.takeIf { it.contains('.') }
-            ?.let { return it }
-
-        (invokeNoArg(itemInfo, "getTargetPackage") as? String)
-            ?.takeIf { it.contains('.') }
-            ?.let { return it }
-
-        return null
     }
 
     private fun findField(owner: Any, name: String): Field? {
