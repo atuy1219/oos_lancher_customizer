@@ -70,6 +70,20 @@ class OplusIconSurfaceGuard : XposedModule() {
     }
 
     private fun installHooks(classLoader: ClassLoader) {
+        // System Launcher 17.3.12 replaces these classes with the new
+        // iconsurfacemanager.loader/surface pipeline. Do not leave partial hooks
+        // installed or report a critical failure on that build.
+        val managerClass = runCatching {
+            Class.forName(ICON_VIEW_MANAGER_CLASS, false, classLoader)
+        }.getOrNull()
+        val recordClass = runCatching {
+            Class.forName(ICON_SURFACE_RECORD_CLASS, false, classLoader)
+        }.getOrNull()
+        if (managerClass == null || recordClass == null) {
+            moduleLog("legacy IconSurface pipeline unavailable; preserving native surface rendering")
+            return
+        }
+
         val bubbleClass = Class.forName(BTV_CLASS, false, classLoader)
         hookAllNamedMethods(
             bubbleClass,
@@ -93,15 +107,13 @@ class OplusIconSurfaceGuard : XposedModule() {
             ) { chain ->
                 val args = chain.args.toTypedArray()
                 val result = chain.proceed(args)
-                captureThemedPreviewResult(args)
+                captureThemedPreviewResult(chain.thisObject, args)
                 result
             }
             moduleLog("hooked PreviewItemManager#setDrawable exact themed capture")
         }.onFailure {
             moduleLog("PreviewItemManager capture skipped: ${it.message}")
         }
-
-        val managerClass = Class.forName(ICON_VIEW_MANAGER_CLASS, false, classLoader)
 
         hookAllNamedMethods(managerClass, "fetchIcon", "surface-fetchIcon") { chain ->
             val args = chain.args.toTypedArray()
@@ -122,7 +134,6 @@ class OplusIconSurfaceGuard : XposedModule() {
 
         moduleLog("hooked IconViewManager IconSurface sources")
 
-        val recordClass = Class.forName(ICON_SURFACE_RECORD_CLASS, false, classLoader)
         hookAllNamedMethods(recordClass, "onIconLoaded", "surface-final-sink") { chain ->
             val args = chain.args.toTypedArray()
             beforeIconSurfaceLoaded(args)
@@ -168,11 +179,11 @@ class OplusIconSurfaceGuard : XposedModule() {
      * At PRIORITY_HIGHEST we wrap ThemedIcons. Its after-original mutation is therefore
      * complete when chain.proceed() returns here.
      */
-    private fun captureThemedPreviewResult(args: Array<Any?>) {
+    private fun captureThemedPreviewResult(owner: Any?, args: Array<Any?>) {
         val previewParams = args.firstOrNull() ?: return
         val itemInfo = args.getOrNull(1) ?: return
         val pkg = resolvePackageName(itemInfo) ?: return
-        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeItem(itemInfo)) return
+        if (!shouldPatch(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val themed = readField(previewParams, "drawable") as? BitmapDrawable ?: return
         rememberExactThemed(itemInfo, themed, "preview")
