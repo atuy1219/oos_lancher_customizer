@@ -7,7 +7,6 @@ import android.content.pm.PackageItemInfo
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.Drawable
 import android.util.Log
-import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
 import java.util.Collections
 import java.util.LinkedHashMap
