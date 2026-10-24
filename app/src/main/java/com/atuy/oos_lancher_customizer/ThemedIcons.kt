@@ -265,7 +265,7 @@ class ThemedIcons : XposedModule() {
         val context = view.context.applicationContext ?: view.context
         val isShortcut = isShortcutLikeItem(info)
         val originalSource = resolveBestSourceDrawable(context, info, source)
-        val themed = themedDrawable(context, pkg, originalSource, isShortcut) ?: return null
+        val themed = themedDrawable(context, pkg, originalSource, isShortcut, resolveComponentName(info)) ?: return null
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
         bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(themed))
