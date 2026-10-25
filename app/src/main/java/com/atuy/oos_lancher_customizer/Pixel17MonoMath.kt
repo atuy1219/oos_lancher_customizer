@@ -22,7 +22,7 @@ internal object Pixel17MonoMath {
     internal const val SHORTCUT_OUTPUT_SCALE = 1.50f
 
     internal fun outputSize(previousSize: Int, shortcut: Boolean): Int =
-        (previousSize * if (shortcut) SHORTCUT_OUTPUT_SCALE else 1f).roundToInt()
+        (previousSize * (if (shortcut) SHORTCUT_OUTPUT_SCALE else 1f)).roundToInt()
     // IEEE754 float value 0x3f109764 from Pixel 17-907 BaseIconFactory.<clinit>.
     private const val LEGACY_BASE_SCALE = 0.564810037612915f
 
