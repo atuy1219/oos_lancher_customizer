@@ -51,6 +51,17 @@ class Pixel17MonoMathTest {
     }
 
     @Test
+    fun syntheticFallbackOnlyHasSixtyPercentExtraScaling() {
+        assertEquals(0.60f, Pixel17MonoMath.GENERATED_OUTPUT_SCALE, 0f)
+        // The former 1.5x icon occupies 288px before circle masking;
+        // its new raster bounds are 173px, with the 192px theme circle unchanged.
+        assertEquals(173, (288 * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).toDouble()
+            .let { kotlin.math.round(it).toInt() })
+        // Shortcut paths are capped at 192px first, then scaled to 60%.
+        assertEquals(115, kotlin.math.round(192 * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).toInt())
+    }
+
+    @Test
     fun originalOos15AndPixelExplicitScalesAreUnaffected() {
         assertEquals(1.5f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
         assertEquals(0.6f, PixelLauncherThemedAssets.GLYPH_SCALE, 0.000001f)
