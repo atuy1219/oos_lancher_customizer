@@ -516,11 +516,15 @@ class ThemedIcons : XposedModule() {
         val night = isNightMode(context)
         val sourceSig = buildSourceSignature(original)
         val hasLegacy = !isShortcut && Oos15MonochromeAssets.hasArtwork(context, pkg)
-        // Preserve original key and rendering for packages absent in the OOS15 archive.
-        val key = if (hasLegacy) {
-            "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
-        } else {
-            "$pkg|$night|$isShortcut|$sourceSig"
+        // Keep the OOS15 original and native app monochrome ahead of the Pixel
+        // Launcher map. Apps not covered by either map keep their old cache keys.
+        val hasNativeMono = (original as? AdaptiveIconDrawable)?.monochrome != null
+        val hasPixel = !isShortcut && !hasLegacy && !hasNativeMono &&
+            PixelLauncherThemedAssets.hasArtwork(pkg)
+        val key = when {
+            hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
+            hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
+            else -> "$pkg|$night|$isShortcut|$sourceSig"
         }
 
         if (failedKeys.get(key) == true) {
@@ -610,6 +614,10 @@ class ThemedIcons : XposedModule() {
         component: ComponentName?
     ): Bitmap? {
         val legacyBitmap = if (!isShortcut) Oos15MonochromeAssets.load(context, pkg, component) else null
+        val hasNativeMono = (original as? AdaptiveIconDrawable)?.monochrome != null
+        val pixelBitmap = if (!isShortcut && legacyBitmap == null && !hasNativeMono) {
+            PixelLauncherThemedAssets.load(pkg)
+        } else null
         val isDarkMode = isNightMode(context)
         val bgColor = context.getColor(
             if (isDarkMode) android.R.color.system_neutral1_800
@@ -637,6 +645,8 @@ class ThemedIcons : XposedModule() {
                 BitmapDrawable(context.resources, legacyBitmap).mutate()
             } else if (isTrueAdaptive) {
                 original.monochrome!!.mutate()
+            } else if (pixelBitmap != null) {
+                BitmapDrawable(context.resources, pixelBitmap).mutate()
             } else {
                 val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
                 MonochromeIconFactory(original, size, context.resources).create()
@@ -661,12 +671,15 @@ class ThemedIcons : XposedModule() {
             }
 
         val baseIconSize = when {
-            // The OOS15 PNG canvas contains substantial intrinsic padding.
-            // Zoom only its foreground (not the circular theme background).
-            // ConsumerIR's glyph approaches the lower PNG edge; a smaller
-            // scale avoids clipping its off-center design.
+            // OEM PNG contains intrinsic padding: retain the proven 1.5x zoom.
             legacyBitmap != null -> (
                 size * Oos15MonochromeAssets.glyphScale(pkg)
+            ).roundToInt()
+            // Both Pixel and Oplus IconProvider pad theme fallback vectors
+            // by 20% on each side. AdaptiveIconDrawable's extra foreground
+            // inset is compensated at render time: net 60% of this circle.
+            pixelBitmap != null -> (
+                size * PixelLauncherThemedAssets.GLYPH_SCALE
             ).roundToInt()
             isTrueAdaptive -> (size * 1.50f).toInt()
             isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
