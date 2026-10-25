@@ -524,6 +524,7 @@ class ThemedIcons : XposedModule() {
             PixelLauncherThemedAssets.hasArtwork(pkg)
         val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
+            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v3-scale150"
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
             hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-synthetic-mono-v2-scale060"
@@ -678,17 +679,15 @@ class ThemedIcons : XposedModule() {
                 (1f + 2f * AdaptiveIconDrawable.getExtraInsetFraction())
             ).roundToInt()
         }
-        // Keep the generated Pixel 17 shape/contrast logic unchanged. Scale
-        // only synthetic fallback icons to 60% of their PREVIOUS displayed
-        // bounds. Native monochrome, OEM15 and Pixel bundled glyphs are untouched.
+        // Retain Pixel 17's monochrome generation, changing only the raster
+        // bounds: ordinary synthetic icons at 0.6x, and shortcuts at 1.5x.
+        // Multiply AFTER the original shortcut cap, otherwise the previous
+        // min(size, ...) limit would silently discard the requested zoom.
+        // Native app glyphs and OEM/Pixel artwork keep their original scale.
         val isSyntheticFallback = legacyBitmap == null && pixelBitmap == null && !isTrueAdaptive
         val previousIconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
-        val iconSize = if (isSyntheticFallback) {
-            (previousIconSize * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).roundToInt()
-        } else {
-            previousIconSize
-        }
+        val iconSize = Pixel17MonoMath.outputSize(previousIconSize, isShortcut, isSyntheticFallback)
         val offset = (size - iconSize) / 2
 
         runCatching {
