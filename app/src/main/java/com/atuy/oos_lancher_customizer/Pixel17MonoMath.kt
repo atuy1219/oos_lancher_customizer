@@ -14,6 +14,12 @@ import kotlin.math.roundToInt
  * BaseIconFactory.LEGACY_ICON_SCALE, then in an AdaptiveIconDrawable.
  */
 internal object Pixel17MonoMath {
+    /**
+     * Extra output zoom applied only to the generated monochrome fallback.
+     * The Pixel algorithm is unchanged; native monochrome, OOS15 and Pixel
+     * bundled artwork continue to use their existing scale.
+     */
+    internal const val GENERATED_OUTPUT_SCALE = 0.60f
     // IEEE754 float value 0x3f109764 from Pixel 17-907 BaseIconFactory.<clinit>.
     private const val LEGACY_BASE_SCALE = 0.564810037612915f
 
