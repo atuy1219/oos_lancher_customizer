@@ -52,7 +52,7 @@ class Pixel17MonoMathTest {
 
     @Test
     fun originalOos15AndPixelExplicitScalesAreUnaffected() {
-        assertEquals(1.5f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
+        assertEquals(1.5f, Oos15MonochromeAssets.GLYPH_SCALE, 0f)
         assertEquals(0.6f, PixelLauncherThemedAssets.GLYPH_SCALE, 0.000001f)
     }
 }
