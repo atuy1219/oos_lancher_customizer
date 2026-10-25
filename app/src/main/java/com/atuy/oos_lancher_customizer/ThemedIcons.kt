@@ -706,17 +706,12 @@ class ThemedIcons : XposedModule() {
         // Multiply AFTER the original shortcut cap, otherwise the previous
         // min(size, ...) limit would silently discard the requested zoom.
         // Native app glyphs and OEM/Pixel artwork keep their original scale.
-        val isSyntheticFallback = legacyBitmap == null && pixelBitmap == null && !isTrueAdaptive
-        // Synthetic icons use the actual adaptive mask normalization instead
-        // of the previous guessed 0.6x multiplier; legacy sources are also
-        // normalized INSIDE MonochromeIconFactory before wrapping.
+        // Normal app glyphs now follow IconNormalizer's computed adaptive
+        // mask scale, with the legacy source's hull normalized before wrapping.
+        // Only shortcuts retain their explicitly requested 1.5x extra zoom.
         val previousIconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
-        val iconSize = if (isSyntheticFallback && !isShortcut) {
-            previousIconSize
-        } else {
-            Pixel17MonoMath.outputSize(previousIconSize, isShortcut, false)
-        }
+        val iconSize = Pixel17MonoMath.outputSize(previousIconSize, isShortcut)
         val offset = (size - iconSize) / 2
 
         runCatching {
