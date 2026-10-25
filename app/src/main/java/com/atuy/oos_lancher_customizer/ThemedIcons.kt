@@ -507,6 +507,25 @@ class ThemedIcons : XposedModule() {
         return output
     }
 
+    /**
+     * Match Pixel BaseIconFactory.ClippedMonoDrawable by clipping the
+     * foreground/background result with the platform adaptive icon mask,
+     * rather than assuming the mask is always a mathematical circle.
+     * Original OEM/Pixel bundle draw paths intentionally retain circleMasked.
+     */
+    private fun adaptiveIconMasked(bitmap: Bitmap): Bitmap {
+        val size = min(bitmap.width, bitmap.height)
+        val output = createBitmap(size, size)
+        val canvas = Canvas(output)
+        val crop = AdaptiveIconDrawable(ColorDrawable(Color.BLACK), null)
+        crop.setBounds(0, 0, size, size)
+        val save = canvas.save()
+        canvas.clipPath(crop.iconMask)
+        canvas.drawBitmap(bitmap, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
+        canvas.restoreToCount(save)
+        return output
+    }
+
     private fun themedDrawable(
         context: Context,
         pkg: String,
@@ -524,10 +543,10 @@ class ThemedIcons : XposedModule() {
             PixelLauncherThemedAssets.hasArtwork(pkg)
         val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
-            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v3-scale150"
+            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v4-normalized"
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-synthetic-mono-v2-scale060"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-normalized-mono-v3-mask"
             else -> "$pkg|$night|$isShortcut|$sourceSig"
         }
 
@@ -654,7 +673,14 @@ class ThemedIcons : XposedModule() {
 
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
         val radius = size * 0.5f
-        canvas.drawCircle(size * 0.5f, size * 0.5f, radius, bgPaint)
+        if (legacyBitmap != null || pixelBitmap != null) {
+            // Keep the already approved OOS15 and Pixel-specific icons intact.
+            canvas.drawCircle(size * 0.5f, size * 0.5f, radius, bgPaint)
+        } else {
+            // The platform mask, rather than a hard-coded circle, is applied
+            // to both layers when the rendered fallback is complete.
+            canvas.drawColor(bgColor)
+        }
 
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
@@ -670,14 +696,10 @@ class ThemedIcons : XposedModule() {
             pixelBitmap != null -> (
                 size * PixelLauncherThemedAssets.GLYPH_SCALE
             ).roundToInt()
-            // Pixel MonoIconThemeController wraps both generated alpha masks
-            // and native monochrome layers in an InsetDrawable with a NEGATIVE
-            // AdaptiveIconDrawable extra inset. This applies to adaptive and
-            // legacy-wrapped icons alike, rather than scaling bitmap-backed
-            // adaptive icons differently.
-            else -> (size *
-                (1f + 2f * AdaptiveIconDrawable.getExtraInsetFraction())
-            ).roundToInt()
+            // AOSP BaseIconFactory draws normalized adaptive icons at their
+            // normalized mask area. This replaces the unsupported fixed 1.5x
+            // assumption for generated masks and native monochrome layers.
+            else -> (size * Pixel17IconNormalizer.adaptiveMaskScale(size)).roundToInt()
         }
         // Retain Pixel 17's monochrome generation, changing only the raster
         // bounds: ordinary synthetic icons at 0.6x, and shortcuts at 1.5x.
@@ -685,9 +707,16 @@ class ThemedIcons : XposedModule() {
         // min(size, ...) limit would silently discard the requested zoom.
         // Native app glyphs and OEM/Pixel artwork keep their original scale.
         val isSyntheticFallback = legacyBitmap == null && pixelBitmap == null && !isTrueAdaptive
+        // Synthetic icons use the actual adaptive mask normalization instead
+        // of the previous guessed 0.6x multiplier; legacy sources are also
+        // normalized INSIDE MonochromeIconFactory before wrapping.
         val previousIconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
-        val iconSize = Pixel17MonoMath.outputSize(previousIconSize, isShortcut, isSyntheticFallback)
+        val iconSize = if (isSyntheticFallback && !isShortcut) {
+            previousIconSize
+        } else {
+            Pixel17MonoMath.outputSize(previousIconSize, isShortcut, false)
+        }
         val offset = (size - iconSize) / 2
 
         runCatching {
@@ -708,7 +737,11 @@ class ThemedIcons : XposedModule() {
             }
         }
 
-        return circleMasked(bitmap)
+        return if (legacyBitmap != null || pixelBitmap != null) {
+            circleMasked(bitmap)
+        } else {
+            adaptiveIconMasked(bitmap)
+        }
     }
 
     private inner class MonochromeIconFactory(
@@ -766,9 +799,20 @@ class ThemedIcons : XposedModule() {
             val source = if (icon is AdaptiveIconDrawable) {
                 icon
             } else {
-                val scale = Pixel17MonoMath.legacyWrappedScale(
-                    AdaptiveIconDrawable.getExtraInsetFraction()
+                val crop = AdaptiveIconDrawable(ColorDrawable(Color.BLACK), null)
+                crop.setBounds(0, 0, iconBitmapSize, iconBitmapSize)
+                val normal = Pixel17IconNormalizer.measure(
+                    icon, iconBitmapSize, crop.iconMask
                 )
+                val extra = AdaptiveIconDrawable.getExtraInsetFraction()
+                val scale = if (normal.matchesMask) {
+                    // A launcher-mask-shaped legacy source should not receive
+                    // the heavy generic legacy wrapper padding.
+                    1f - extra
+                } else {
+                    // Same normalizeAndWrapToAdaptiveIcon path as Pixel 17.
+                    normal.scale * Pixel17MonoMath.legacyWrappedScale(extra)
+                }
                 val insets = Pixel17MonoMath.legacyInsets(
                     icon.intrinsicWidth, icon.intrinsicHeight, scale
                 )
