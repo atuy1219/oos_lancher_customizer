@@ -3,21 +3,18 @@ package com.atuy.oos_lancher_customizer
 import android.content.ComponentName
 import android.content.Context
 import android.content.pm.LauncherApps
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
-import android.graphics.BlendMode
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.os.UserHandle
 import android.util.Log
@@ -31,7 +28,6 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam
 import java.lang.ref.WeakReference
 import java.lang.reflect.Field
 import java.lang.reflect.Method
-import java.nio.ByteBuffer
 import java.util.Collections
 import java.util.WeakHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -460,9 +456,24 @@ class ThemedIcons : XposedModule() {
                 launcherApps.getActivityList(component.packageName, user).firstOrNull {
                     it.componentName == component
                 }
-            if (activityInfo != null) return@runCatching activityInfo.getIcon(0)
-            context.packageManager.getActivityIcon(component)
-        }.getOrNull()
+            // Read the manifest resource directly. OEM LauncherActivityInfo#getIcon
+            // may return a pre-scaled/themed adaptive wrapper instead of the APK icon.
+            val manifest = context.packageManager.getActivityInfo(
+                component, PackageManager.ComponentInfoFlags.of(0)
+            )
+            val res = context.packageManager.getResourcesForApplication(
+                activityInfo?.applicationInfo ?: manifest.applicationInfo
+            )
+            val raw = res.getDrawableForDensity(
+                manifest.iconResource, context.resources.displayMetrics.densityDpi, null
+            ) ?: return@runCatching null
+            moduleLog("raw icon pkg=${component.packageName} type=${raw.javaClass.name} " +
+                "nativeMono=${(raw as? AdaptiveIconDrawable)?.monochrome != null}")
+            raw
+        }.getOrElse { error ->
+            moduleLog("raw resource unavailable pkg=${component.packageName}: ${error.javaClass.simpleName}")
+            runCatching { context.packageManager.getActivityIcon(component) }.getOrNull()
+        }
     }
 
     private fun resolveBestSourceDrawable(
@@ -471,9 +482,28 @@ class ThemedIcons : XposedModule() {
         fallback: Drawable
     ): Drawable {
         val itemType = resolveItemType(itemInfo)
-        if (itemType != 0 || isShortcutLikeItem(itemInfo)) {
+        if (isShortcutLikeItem(itemInfo)) {
+            val id = (invokeNoArg(itemInfo, "getDeepShortcutId") as? String)
+                ?: (readField(itemInfo, "deepShortcutId") as? String)
+            val pkg = resolvePackageName(itemInfo)
+            if (!id.isNullOrEmpty() && pkg != null) {
+                val raw = runCatching {
+                    val apps = context.getSystemService(LauncherApps::class.java)
+                    val query = LauncherApps.ShortcutQuery()
+                        .setPackage(pkg).setShortcutIds(listOf(id))
+                        .setQueryFlags(LauncherApps.ShortcutQuery.FLAG_MATCH_PINNED or
+                            LauncherApps.ShortcutQuery.FLAG_MATCH_DYNAMIC or
+                            LauncherApps.ShortcutQuery.FLAG_MATCH_MANIFEST)
+                    val user = resolveUserHandle(itemInfo) ?: android.os.Process.myUserHandle()
+                    val info = apps.getShortcuts(query, user)?.firstOrNull()
+                    info?.let { apps.getShortcutIconDrawable(it,
+                        context.resources.displayMetrics.densityDpi) }
+                }.getOrNull()
+                if (raw != null) return raw
+            }
             return fallback
         }
+        if (itemType != 0) return fallback
         val component = resolveComponentName(itemInfo) ?: return fallback
         val user = resolveUserHandle(itemInfo) ?: android.os.Process.myUserHandle()
         return loadOriginalIcon(context, component, user) ?: fallback
@@ -521,10 +551,13 @@ class ThemedIcons : XposedModule() {
         val hasNativeMono = (original as? AdaptiveIconDrawable)?.monochrome != null
         val hasPixel = !isShortcut && !hasLegacy && !hasNativeMono &&
             PixelLauncherThemedAssets.hasArtwork(pkg)
+        val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
+            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v7-themed-margin"
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            else -> "$pkg|$night|$isShortcut|$sourceSig"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-mono-v6-themed-margin"
+            else -> "$pkg|$night|$isShortcut|$sourceSig|native-mono-v5-raw-source"
         }
 
         if (failedKeys.get(key) == true) {
@@ -589,23 +622,6 @@ class ThemedIcons : XposedModule() {
         return toSoftwareBitmap(reflected)
     }
 
-    private fun drawDrawableSafely(drawable: Drawable, canvas: Canvas, size: Int): Boolean {
-        return runCatching {
-            drawable.setBounds(0, 0, size, size)
-            drawable.draw(canvas)
-            true
-        }.getOrElse { error ->
-            val message = error.message ?: ""
-            if (!message.contains("hardware bitmaps", ignoreCase = true)) return false
-
-            val softwareBitmap = extractSoftwareBitmap(drawable) ?: return false
-            val src = Rect(0, 0, softwareBitmap.width, softwareBitmap.height)
-            val dst = Rect(0, 0, size, size)
-            canvas.drawBitmap(softwareBitmap, src, dst, null)
-            true
-        }
-    }
-
     private fun generateRawThemedBitmap(
         context: Context,
         pkg: String,
@@ -628,29 +644,26 @@ class ThemedIcons : XposedModule() {
             else android.R.color.system_accent1_600
         )
 
-        val isAdaptive = original is AdaptiveIconDrawable
-        val isWrappedLegacyAdaptive =
-            isAdaptive && (original.background is ColorDrawable) &&
-                (original.foreground is BitmapDrawable)
-        val isTrueAdaptive = isAdaptive && original.monochrome != null
-        val isLikelyBitmapAdaptive =
-            isAdaptive && original.monochrome == null && (
-                original.background is BitmapDrawable ||
-                    original.foreground is BitmapDrawable ||
-                    original.foreground == null
-                )
-
-        val monoDrawable: Drawable =
-            if (legacyBitmap != null) {
-                BitmapDrawable(context.resources, legacyBitmap).mutate()
-            } else if (isTrueAdaptive) {
-                original.monochrome!!.mutate()
-            } else if (pixelBitmap != null) {
-                BitmapDrawable(context.resources, pixelBitmap).mutate()
-            } else {
-                val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
-                MonochromeIconFactory(original, size, context.resources).create()
+        val monoDrawable: Drawable = when {
+            legacyBitmap != null -> BitmapDrawable(context.resources, legacyBitmap).mutate()
+            pixelBitmap != null -> BitmapDrawable(context.resources, pixelBitmap).mutate()
+            else -> {
+                val alpha = runCatching {
+                    Pixel17MonochromeRenderer.render(
+                        original, 192, context.resources, matchThemeBackground = true
+                    )
+                }.recoverCatching {
+                    val software = extractSoftwareBitmap(original) ?: throw it
+                    Pixel17MonochromeRenderer.render(
+                        BitmapDrawable(context.resources, software), 192, context.resources,
+                        matchThemeBackground = true
+                    )
+                }.onFailure {
+                    moduleLog("skip Pixel mono generation pkg=$pkg: ${it.message}")
+                }.getOrNull() ?: return null
+                BitmapDrawable(context.resources, alpha)
             }
+        }
 
         val size = 192
         val bitmap = createBitmap(size, size)
@@ -663,13 +676,6 @@ class ThemedIcons : XposedModule() {
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
 
-        val monoIntrinsic =
-            if (monoDrawable.intrinsicWidth > 0 && monoDrawable.intrinsicHeight > 0) {
-                min(monoDrawable.intrinsicWidth, monoDrawable.intrinsicHeight)
-            } else {
-                size
-            }
-
         val baseIconSize = when {
             // OEM PNG contains intrinsic padding: retain the proven 1.5x zoom.
             legacyBitmap != null -> (
@@ -681,13 +687,11 @@ class ThemedIcons : XposedModule() {
             pixelBitmap != null -> (
                 size * PixelLauncherThemedAssets.GLYPH_SCALE
             ).roundToInt()
-            isTrueAdaptive -> (size * 1.50f).toInt()
-            isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
-            isAdaptive -> (size * 1.50f).toInt()
-            else -> min(size, monoIntrinsic)
+            // The Pixel renderer already applies the negative inset to both
+            // native and synthetic layers. Do not apply a second expansion.
+            else -> size
         }
-        val iconSize =
-            if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
+        val iconSize = baseIconSize
         val offset = (size - iconSize) / 2
 
         runCatching {
@@ -711,110 +715,4 @@ class ThemedIcons : XposedModule() {
         return circleMasked(bitmap)
     }
 
-    private inner class MonochromeIconFactory(
-        private val icon: Drawable,
-        iconBitmapSize: Int,
-        private val resources: android.content.res.Resources
-    ) {
-        private val mBitmapSize: Int
-        private val mEdgePixelLength: Int
-        private val mFlatBitmap: Bitmap
-        private val mFlatCanvas: Canvas
-        private val mAlphaBitmap: Bitmap
-        private val mAlphaCanvas: Canvas
-        private val mPixels: ByteArray
-        private val mCopyPaint: Paint
-        private val mDrawPaint: Paint
-        private val mSrcRect: Rect
-
-        init {
-            val extraFactor = AdaptiveIconDrawable.getExtraInsetFraction()
-            val viewPortScale = 1f / (1 + 2 * extraFactor)
-            mBitmapSize = (iconBitmapSize * 2 * viewPortScale).roundToInt()
-            mEdgePixelLength = mBitmapSize * (mBitmapSize - iconBitmapSize) / 2
-            mPixels = ByteArray(mBitmapSize * mBitmapSize)
-
-            mFlatBitmap = createBitmap(mBitmapSize, mBitmapSize)
-            mFlatCanvas = Canvas(mFlatBitmap)
-            mAlphaBitmap = createBitmap(mBitmapSize, mBitmapSize, Bitmap.Config.ALPHA_8)
-            mAlphaCanvas = Canvas(mAlphaBitmap)
-
-            mDrawPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply { color = Color.WHITE }
-            mSrcRect = Rect(0, 0, mBitmapSize, mBitmapSize)
-
-            mCopyPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-                blendMode = BlendMode.SRC
-                val satMatrix = ColorMatrix().apply { setSaturation(0f) }
-                val vals = satMatrix.array
-                vals[15] = 0.3333f
-                vals[16] = 0.3333f
-                vals[17] = 0.3333f
-                vals[18] = 0f
-                vals[19] = 0f
-                colorFilter = ColorMatrixColorFilter(vals)
-            }
-        }
-
-        fun create(): Drawable {
-            convertMono()
-            return mAlphaBitmap.toDrawable(resources).apply {
-                setBounds(0, 0, mBitmapSize, mBitmapSize)
-            }
-        }
-
-        private fun convertMono() {
-            if (icon is AdaptiveIconDrawable) {
-                mFlatCanvas.drawColor(Color.BLACK)
-                drawDrawable(icon.background)
-                drawDrawable(icon.foreground)
-            } else {
-                mFlatCanvas.drawColor(Color.WHITE)
-                drawDrawable(icon)
-            }
-            generateMono()
-        }
-
-        private fun drawDrawable(drawable: Drawable?) {
-            drawable?.apply {
-                if (!drawDrawableSafely(this, mFlatCanvas, mBitmapSize)) {
-                    moduleLog("skip drawDrawable in mono factory: ${javaClass.name}")
-                }
-            }
-        }
-
-        private fun generateMono() {
-            mAlphaCanvas.drawBitmap(mFlatBitmap, 0f, 0f, mCopyPaint)
-            val buffer = ByteBuffer.wrap(mPixels)
-            buffer.rewind()
-            mAlphaBitmap.copyPixelsToBuffer(buffer)
-
-            var min = 0xFF
-            var max = 0
-            for (b in mPixels) {
-                val v = b.toInt() and 0xFF
-                if (v < min) min = v
-                if (v > max) max = v
-            }
-
-            if (min < max) {
-                val range = (max - min).toFloat()
-                var sum = 0
-                for (i in 0 until mEdgePixelLength) {
-                    sum += (mPixels[i].toInt() and 0xFF)
-                    sum += (mPixels[mPixels.size - 1 - i].toInt() and 0xFF)
-                }
-                val edgeAverage = sum / (mEdgePixelLength * 2f)
-                val edgeMapped = (edgeAverage - min) / range
-                val flipColor = edgeMapped > 0.5f
-
-                for (i in mPixels.indices) {
-                    val p = mPixels[i].toInt() and 0xFF
-                    val p2 = ((p - min) * 0xFF / range).roundToInt()
-                    mPixels[i] = (if (flipColor) (255 - p2) else p2).toByte()
-                }
-                buffer.rewind()
-                mAlphaBitmap.copyPixelsFromBuffer(buffer)
-            }
-        }
-    }
 }
