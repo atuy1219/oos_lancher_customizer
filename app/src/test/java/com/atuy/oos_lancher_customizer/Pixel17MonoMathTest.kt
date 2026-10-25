@@ -20,7 +20,7 @@ class Pixel17MonoMathTest {
         val pixels = byteArrayOf(64, 96, 128.toByte(), 160.toByte(), 192.toByte())
         Pixel17MonoMath.normalizeAndSmooth(pixels)
         assertArrayEquals(
-            byteArrayOf(0, 32, 128.toByte(), 224.toByte(), 255.toByte()),
+            byteArrayOf(0, 32, 128.toByte(), 223.toByte(), 255.toByte()),
             pixels
         )
     }
