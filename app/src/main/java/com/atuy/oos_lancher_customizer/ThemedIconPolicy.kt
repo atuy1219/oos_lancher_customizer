@@ -7,6 +7,7 @@ import android.view.View
 import java.util.Collections
 import java.util.Locale
 import java.util.WeakHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Scope themed icons to real workspace/hotseat icons and icons inside home-screen folders.
@@ -26,7 +27,9 @@ internal object ThemedIconPolicy {
     private const val BIG_FOLDER_ITEM_VIEW =
         "com.android.launcher3.folder.big.BigFolderItemIcon"
 
-    private val themedDrawables = Collections.synchronizedMap(WeakHashMap<Drawable, Boolean>())
+    private data class Snapshot(val generation: Long, val state: Drawable.ConstantState?)
+    @Volatile private var generation = 0L
+    private val themedDrawables = Collections.synchronizedMap(WeakHashMap<Drawable, Snapshot>())
 
     // Shared between ThemedIcons, FloatingIconGuard and IconSurfaceGuard.
     // Key by the complete launcher item identity, never the package name alone.
@@ -40,27 +43,50 @@ internal object ThemedIconPolicy {
     )
 
     fun rememberDrawable(drawable: Drawable, item: Any? = null) {
-        themedDrawables[drawable] = true
-        if (item != null && shouldThemeItem(item)) {
-            drawable.constantState?.let { state ->
-                // Folder preview rendering changes alpha on its Drawable.
-                // Cache a *detached* ConstantState so a dimmed frame cannot
-                // overwrite the icon used by the app-close animation.
-                val cleanState = runCatching {
-                    state.newDrawable().mutate().apply {
-                        alpha = 255
-                        clearColorFilter()
-                    }.constantState
-                }.getOrNull() ?: state
-                synchronized(themedStates) { themedStates[itemKey(item)] = cleanState }
+        val snapshot = synchronized(themedDrawables) {
+            themedDrawables[drawable]?.takeIf { it.generation == generation } ?: run {
+                // Detach once per drawable, not once per frame. Keep a clean
+                // state even if the folder preview later dims the live drawable.
+                val clean = drawable.constantState?.let { state ->
+                    runCatching {
+                        state.newDrawable().mutate().apply {
+                            alpha = 255
+                            clearColorFilter()
+                        }.constantState
+                    }.getOrNull() ?: state
+                }
+                Snapshot(generation, clean).also { themedDrawables[drawable] = it }
+            }
+        }
+        if (item != null && shouldThemeItem(item) && snapshot.state != null) {
+            val key = itemKey(item)
+            synchronized(themedStates) {
+                if (snapshot.generation == generation) themedStates[key] = snapshot.state
             }
         }
     }
 
-    fun themedStateFor(item: Any): Drawable.ConstantState? =
-        synchronized(themedStates) { themedStates[itemKey(item)] }
+    fun themedStateFor(item: Any): Drawable.ConstantState? {
+        val key = itemKey(item)
+        return synchronized(themedStates) { themedStates[key] }
+    }
 
-    fun isThemedDrawable(drawable: Drawable): Boolean = themedDrawables[drawable] == true
+    fun isThemedDrawable(drawable: Drawable): Boolean =
+        themedDrawables[drawable]?.generation == generation
+
+    fun isKnownThemedDrawable(drawable: Drawable): Boolean = themedDrawables.containsKey(drawable)
+
+    private val invalidators = CopyOnWriteArrayList<() -> Unit>()
+
+    fun onThemeInvalidated(invalidate: () -> Unit) { invalidators.add(invalidate) }
+
+    fun invalidateTheme() {
+        synchronized(themedStates) {
+            generation++
+            themedStates.clear()
+        }
+        invalidators.forEach { it() }
+    }
 
     // Positive containers identify folder IDs. -103 is Oplus' predicted Hotseat,
     // unlike -102 (the prediction surface outside the dock).
@@ -101,16 +127,18 @@ internal object ThemedIconPolicy {
      * Exclude launcher-owned UI surfaces before looking at the item. In particular,
      * a widget may launch an app whose ItemInfo looks identical to a desktop icon.
      */
+    private val excludedSurfaces = listOf(
+        "allapps", "drawer", "category", "cluster", "searchresult", "taskbar",
+        "prediction", "recommend", "smartsidebar", "cardcontainer"
+    )
+
     internal fun isExcludedSurfaceClass(className: String): Boolean {
         val name = className.lowercase(Locale.ROOT)
         val simpleName = name.substringAfterLast('.')
         // ShortcutAndWidgetContainer is the normal CellLayout child on the desktop.
         if (simpleName.contains("widget") &&
             !simpleName.endsWith("shortcutandwidgetcontainer")) return true
-        return listOf(
-            "allapps", "drawer", "category", "cluster", "searchresult",
-            "taskbar", "prediction", "recommend", "smartsidebar", "cardcontainer"
-        ).any { name.contains(it) }
+        return excludedSurfaces.any { name.contains(it) }
     }
 
     // Check the real View hierarchy, not a class-name substring of the icon itself.
@@ -233,33 +261,7 @@ internal object ThemedIconPolicy {
         )
     }
 
-    private fun read(owner: Any, name: String): Any? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val field = runCatching { current.getDeclaredField(name) }.getOrNull()
-            if (field != null) return runCatching {
-                field.isAccessible = true
-                field.get(owner)
-            }.getOrNull()
-            cls = current.superclass
-        }
-        return null
-    }
+    private fun read(owner: Any, name: String): Any? = CachedReflection.read(owner, name)
 
-    private fun call(owner: Any, name: String): Any? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val method = current.declaredMethods.firstOrNull {
-                it.name == name && it.parameterCount == 0
-            }
-            if (method != null) return runCatching {
-                method.isAccessible = true
-                method.invoke(owner)
-            }.getOrNull()
-            cls = current.superclass
-        }
-        return null
-    }
+    private fun call(owner: Any, name: String): Any? = CachedReflection.call(owner, name)
 }

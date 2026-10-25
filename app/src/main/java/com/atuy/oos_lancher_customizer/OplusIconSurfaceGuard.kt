@@ -80,6 +80,7 @@ class OplusIconSurfaceGuard : XposedModule() {
 
         runCatching {
             installHooks(param.defaultClassLoader)
+            ThemedIconPolicy.onThemeInvalidated { targetOverrides.clear(); callbackTargets.clear() }
             hooksInstalled = true
         }.onFailure {
             moduleLog("critical: ${it.message}", it)
@@ -383,39 +384,16 @@ class OplusIconSurfaceGuard : XposedModule() {
         return null
     }
 
-    private fun findField(owner: Any, name: String): Field? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val field = runCatching {
-                current.getDeclaredField(name).apply { isAccessible = true }
-            }.getOrNull()
-            if (field != null) return field
-            cls = current.superclass
-        }
-        return null
-    }
+    private fun findField(owner: Any, name: String): Field? =
+        CachedReflection.field(owner.javaClass, name)
 
     private fun readField(owner: Any?, name: String): Any? {
         if (owner == null) return null
         return runCatching { findField(owner, name)?.get(owner) }.getOrNull()
     }
 
-    private fun findNoArgMethod(owner: Any, name: String): Method? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val method = current.declaredMethods.firstOrNull {
-                it.name == name && it.parameterCount == 0
-            }
-            if (method != null) {
-                method.isAccessible = true
-                return method
-            }
-            cls = cls.superclass
-        }
-        return null
-    }
+    private fun findNoArgMethod(owner: Any, name: String): Method? =
+        CachedReflection.method(owner.javaClass, name)
 
     private fun invokeNoArg(owner: Any, name: String): Any? {
         return runCatching { findNoArgMethod(owner, name)?.invoke(owner) }.getOrNull()

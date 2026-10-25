@@ -8,7 +8,6 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.Rect
@@ -18,7 +17,6 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.os.UserHandle
 import android.util.Log
-import android.util.LruCache
 import android.view.View
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.drawable.toDrawable
@@ -30,7 +28,6 @@ import java.lang.reflect.Field
 import java.lang.reflect.Method
 import java.util.Collections
 import java.util.WeakHashMap
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -46,13 +43,74 @@ class ThemedIcons : XposedModule() {
         private const val BIG_FOLDER_ITEM_CLASS =
             "com.android.launcher3.folder.big.BigFolderItemIcon"
         private const val FLOATING_ICON_VIEW_CLASS = "com.android.launcher3.views.FloatingIconView"
-        private const val LOG_EVERY_N_HITS = 30L
     }
 
-    private val seq = AtomicLong(0)
-    private val cacheHits = AtomicLong(0)
-    private val cacheMiss = AtomicLong(0)
-    private val failedKeys = object : LruCache<String, Boolean>(1024) {}
+    private val iconCache = IconBitmapCache()
+    @Volatile private var environment: IconEnvironment? = null
+
+    private data class Binding(
+        val key: String, val state: Drawable.ConstantState?, val original: WeakReference<Drawable>,
+        val version: Int?
+    ) {
+        fun restore(context: Context): Drawable? =
+            state?.newDrawable(context.resources)?.mutate() ?: original.get()
+    }
+    private data class PreviewBinding(val owner: WeakReference<Any>, val item: Any, val source: Binding?)
+    private val bubbles = Collections.synchronizedMap(WeakHashMap<View, Binding>())
+    private val folders = Collections.synchronizedMap(WeakHashMap<View, Binding>())
+    private val previews = Collections.synchronizedMap(WeakHashMap<Any, PreviewBinding>())
+
+    private fun prepare(context: Context) {
+        if (environment != null) return
+        synchronized(this) {
+            if (environment == null) environment = IconEnvironment(
+                context.applicationContext ?: context,
+                invalidate = {
+                    iconCache.clear()
+                    bigFolderViewCache.clear()
+                    ThemedIconPolicy.invalidateTheme()
+                },
+                refresh = ::refreshVisibleIcons,
+                trim = { iconCache.clear() }
+            )
+        }
+    }
+
+    private fun binding(
+        map: MutableMap<View, Binding>, view: View, item: Any, drawable: Drawable
+    ): Binding? {
+        val key = ThemedIconPolicy.itemKey(item)
+        if (ThemedIconPolicy.isKnownThemedDrawable(drawable)) return map[view]?.takeIf { it.key == key }
+        return originalBinding(key, drawable).also { map[view] = it }
+    }
+
+    private fun originalBinding(key: String, drawable: Drawable): Binding {
+        val bitmap = (drawable as? BitmapDrawable)?.bitmap
+            ?: (CachedReflection.call(drawable, "getBitmap") as? Bitmap)
+        return Binding(key, drawable.constantState, WeakReference(drawable),
+            bitmap?.generationId ?: drawable.constantState?.hashCode())
+    }
+
+    private fun refreshVisibleIcons() {
+        val views = synchronized(bubbles) { bubbles.entries.map { it.key to it.value } }
+        for ((view, source) in views) {
+            val item = ThemedIconPolicy.itemForView(view) ?: readField(view, "mInfo") ?: continue
+            if (!view.isAttachedToWindow || ThemedIconPolicy.itemKey(item) != source.key) continue
+            val icon = invokeNoArg(view, "getIcon") as? Drawable ?: continue
+            runCatching {
+                CachedReflection.method(view.javaClass, "setIcon", Drawable::class.java)?.invoke(view, icon)
+            }.onFailure { moduleLog("Cannot refresh themed home icon", it) }
+        }
+        val items = synchronized(folders) { folders.keys.toList() }
+        for (view in items) if (view.isAttachedToWindow) reconcileBigFolderItem(view)
+        val entries = synchronized(previews) { previews.entries.map { it.key to it.value } }
+        for ((params, entry) in entries) {
+            val owner = entry.owner.get() ?: continue
+            afterPreviewSetDrawable(owner, arrayOf(params, entry.item))
+            val folder = (invokeNoArg(owner, "getFolderIcon") ?: readField(owner, "mIcon")) as? View
+            folder?.invalidate()
+        }
+    }
 
     // getDrawableByIndex may run every frame. Do not allocate a new themed
     // Drawable from ConstantState on every draw.
@@ -65,11 +123,6 @@ class ThemedIcons : XposedModule() {
         Collections.synchronizedMap(WeakHashMap<View, BigFolderCacheEntry>())
     @Volatile
     private var hooksInstalled = false
-
-    // Max 16MB for themed icon bitmaps.
-    private val iconCache = object : LruCache<String, Bitmap>(16 * 1024) {
-        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
-    }
 
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE || hooksInstalled) return
@@ -191,22 +244,20 @@ class ThemedIcons : XposedModule() {
 
         if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeView(view, itemInfo)) return
 
+        val context = view.context.applicationContext ?: view.context
+        prepare(context)
+        val original = binding(bubbles, view, itemInfo, drawable)
         // Skip already themed drawables to avoid repeated monochrome conversion.
         if (ThemedIconPolicy.isThemedDrawable(drawable)) {
             ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
             return
         }
 
-        val context = view.context.applicationContext ?: return
-        val isShortcut = isShortcutLikeItem(itemInfo)
-        val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
+        val themed = themedDrawable(context, pkg, drawable, itemInfo, original) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
 
-        val id = seq.incrementAndGet()
-        moduleLog("[$id] setIcon themed pkg=$pkg view=${view.javaClass.simpleName} display=${safeDisplay(view)}")
     }
 
     private fun beforeBigFolderSetDrawable(owner: Any?, args: Array<Any?>) {
@@ -233,6 +284,9 @@ class ThemedIcons : XposedModule() {
         val pkg = resolvePackageName(info) ?: return null
         if (!shouldApplyToPackage(pkg)) return null
 
+        val context = view.context.applicationContext ?: view.context
+        prepare(context)
+        val originalBinding = binding(folders, view, info, source)
         if (ThemedIconPolicy.isThemedDrawable(source)) {
             ThemedIconPolicy.rememberDrawable(source, info)
             return source
@@ -258,10 +312,7 @@ class ThemedIcons : XposedModule() {
             return restored
         }
 
-        val context = view.context.applicationContext ?: view.context
-        val isShortcut = isShortcutLikeItem(info)
-        val originalSource = resolveBestSourceDrawable(context, info, source)
-        val themed = themedDrawable(context, pkg, originalSource, isShortcut, resolveComponentName(info)) ?: return null
+        val themed = themedDrawable(context, pkg, source, info, originalBinding) ?: return null
         themed.bounds = source.bounds
         ThemedIconPolicy.rememberDrawable(themed, info)
         bigFolderViewCache[view] = BigFolderCacheEntry(WeakReference(source), key, WeakReference(themed))
@@ -275,20 +326,22 @@ class ThemedIcons : XposedModule() {
         if (!shouldApplyToPackage(pkg) || !ThemedIconPolicy.shouldThemeFolderPreview(owner, itemInfo)) return
 
         val drawable = readField(previewParams, "drawable") as? Drawable ?: return
+        val context = resolveContext(owner) ?: return
+        prepare(context)
+        val key = ThemedIconPolicy.itemKey(itemInfo)
+        val original = if (ThemedIconPolicy.isKnownThemedDrawable(drawable)) {
+            previews[previewParams]?.source?.takeIf { it.key == key }
+        } else originalBinding(key, drawable)
+        if (owner != null) previews[previewParams] = PreviewBinding(WeakReference(owner), itemInfo, original)
         if (ThemedIconPolicy.isThemedDrawable(drawable)) {
             ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
             return
         }
-        val context = resolveContext(owner) ?: return
-        val isShortcut = isShortcutLikeItem(itemInfo)
-        val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
+        val themed = themedDrawable(context, pkg, drawable, itemInfo, original) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         writeField(previewParams, "drawable", themed)
 
-        val id = seq.incrementAndGet()
-        moduleLog("[$id] preview themed pkg=$pkg drawable=${drawable.javaClass.simpleName}")
     }
 
     private fun beforeFloatingSetIcon(owner: Any?, args: Array<Any?>) {
@@ -300,10 +353,11 @@ class ThemedIcons : XposedModule() {
         if (!shouldApplyToPackage(pkg) ||
             !ThemedIconPolicy.shouldThemeSurfaceTarget(originalView, itemInfo)) return
 
-        val context = view.context.applicationContext ?: return
-        val isShortcut = isShortcutLikeItem(itemInfo)
-        val source = resolveBestSourceDrawable(context, itemInfo, drawable)
-        val themed = themedDrawable(context, pkg, source, isShortcut, resolveComponentName(itemInfo)) ?: return
+        val context = view.context.applicationContext ?: view.context
+        prepare(context)
+        val themed = ThemedIconPolicy.themedStateFor(itemInfo)
+            ?.newDrawable(context.resources)?.mutate()
+            ?: themedDrawable(context, pkg, drawable, itemInfo) ?: return
         ThemedIconPolicy.rememberDrawable(themed, itemInfo)
         themed.bounds = drawable.bounds
         args[0] = themed
@@ -315,8 +369,6 @@ class ThemedIcons : XposedModule() {
             runCatching { writeField(loadResult, "isThemed", true) }
         }
 
-        val id = seq.incrementAndGet()
-        moduleLog("[$id] floating themed pkg=$pkg drawable=${drawable.javaClass.simpleName}")
     }
 
     private fun resolveFloatingItemInfo(owner: Any): Any? {
@@ -344,22 +396,8 @@ class ThemedIcons : XposedModule() {
         return true
     }
 
-    private fun safeDisplay(view: View): Int? {
-        return (readField(view, "mDisplay") as? Number)?.toInt()
-    }
-
-    private fun findField(owner: Any, name: String): Field? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val field = runCatching {
-                current.getDeclaredField(name).apply { isAccessible = true }
-            }.getOrNull()
-            if (field != null) return field
-            cls = current.superclass
-        }
-        return null
-    }
+    private fun findField(owner: Any, name: String): Field? =
+        CachedReflection.field(owner.javaClass, name)
 
     private fun readField(owner: Any?, name: String): Any? {
         if (owner == null) return null
@@ -371,43 +409,14 @@ class ThemedIcons : XposedModule() {
         field.set(owner, value)
     }
 
-    private fun findNoArgMethod(owner: Any, name: String): Method? {
-        var cls: Class<*>? = owner.javaClass
-        while (cls != null) {
-            val current = cls
-            val method = current.declaredMethods.firstOrNull {
-                it.name == name && it.parameterCount == 0
-            }
-            if (method != null) {
-                method.isAccessible = true
-                return method
-            }
-            cls = current.superclass
-        }
-        return null
-    }
+    private fun findNoArgMethod(owner: Any, name: String): Method? =
+        CachedReflection.method(owner.javaClass, name)
 
     private fun invokeNoArg(owner: Any, name: String): Any? {
         return runCatching { findNoArgMethod(owner, name)?.invoke(owner) }.getOrNull()
     }
 
-    private fun resolveContext(owner: Any?): Context? {
-        (owner as? Context)?.let { return it.applicationContext }
-
-        var cls: Class<*>? = owner?.javaClass
-        while (cls != null) {
-            for (field in cls.declaredFields) {
-                if (!Context::class.java.isAssignableFrom(field.type)) continue
-                val ctx = runCatching {
-                    field.isAccessible = true
-                    field.get(owner) as? Context
-                }.getOrNull()
-                if (ctx != null) return ctx.applicationContext
-            }
-            cls = cls.superclass
-        }
-        return null
-    }
+    private fun resolveContext(owner: Any?): Context? = CachedReflection.context(owner)
 
     private fun resolvePackageName(itemInfo: Any): String? {
         (readField(itemInfo, "componentName") as? ComponentName)
@@ -467,8 +476,6 @@ class ThemedIcons : XposedModule() {
             val raw = res.getDrawableForDensity(
                 manifest.iconResource, context.resources.displayMetrics.densityDpi, null
             ) ?: return@runCatching null
-            moduleLog("raw icon pkg=${component.packageName} type=${raw.javaClass.name} " +
-                "nativeMono=${(raw as? AdaptiveIconDrawable)?.monochrome != null}")
             raw
         }.getOrElse { error ->
             moduleLog("raw resource unavailable pkg=${component.packageName}: ${error.javaClass.simpleName}")
@@ -537,55 +544,34 @@ class ThemedIcons : XposedModule() {
     }
 
     private fun themedDrawable(
-        context: Context,
-        pkg: String,
-        original: Drawable,
-        isShortcut: Boolean,
-        component: ComponentName?
+        context: Context, pkg: String, fallback: Drawable, item: Any,
+        originalBinding: Binding? = null
     ): Drawable? {
-        val night = isNightMode(context)
-        val sourceSig = buildSourceSignature(original)
-        val hasLegacy = !isShortcut && Oos15MonochromeAssets.hasArtwork(context, pkg)
-        // Keep the OOS15 original and native app monochrome ahead of the Pixel
-        // Launcher map. Apps not covered by either map keep their old cache keys.
-        val hasNativeMono = (original as? AdaptiveIconDrawable)?.monochrome != null
-        val hasPixel = !isShortcut && !hasLegacy && !hasNativeMono &&
-            PixelLauncherThemedAssets.hasArtwork(pkg)
-        val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
+        val component = resolveComponentName(item)
+        val user = resolveUserHandle(item) ?: android.os.Process.myUserHandle()
+        val shortcutId = (invokeNoArg(item, "getDeepShortcutId") as? String)
+            ?: (readField(item, "deepShortcutId") as? String)
         val key = when {
-            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v7-themed-margin"
-            hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
-            hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-mono-v6-themed-margin"
-            else -> "$pkg|$night|$isShortcut|$sourceSig|native-mono-v5-raw-source"
-        }
-
-        if (failedKeys.get(key) == true) {
-            return null
-        }
-
-        val cached = iconCache.get(key)
-        if (cached != null) {
-            val hits = cacheHits.incrementAndGet()
-            if (hits % LOG_EVERY_N_HITS == 0L) {
-                moduleLog("cache hit=$hits miss=${cacheMiss.get()} sizeKB=${iconCache.size()}")
+            resolveItemType(item) == 0 && component != null -> "app|$user|$component"
+            !shortcutId.isNullOrEmpty() -> "shortcut|$user|$pkg|$shortcutId"
+            else -> {
+                val version = originalBinding?.version ?: this.originalBinding("", fallback).version
+                "${ThemedIconPolicy.itemKey(item)}|$version"
             }
-            return cached.toDrawable(context.resources)
         }
-
-        val bitmap = generateRawThemedBitmap(context, pkg, original, isShortcut, component)
-        if (bitmap == null) {
-            failedKeys.put(key, true)
-            return null
-        }
-        iconCache.put(key, bitmap)
-        cacheMiss.incrementAndGet()
+        val bitmap = iconCache.getOrLoad(key) {
+            val unthemed = if (ThemedIconPolicy.isKnownThemedDrawable(fallback)) {
+                originalBinding?.restore(context) ?: fallback
+            } else fallback
+            val source = resolveBestSourceDrawable(context, item, unthemed)
+            // If the original source has disappeared, retain the launcher's
+            // drawable instead of converting an old themed bitmap a second time.
+            if (ThemedIconPolicy.isKnownThemedDrawable(source)) null else {
+                generateRawThemedBitmap(context, pkg, source,
+                    isShortcutLikeItem(item), resolveComponentName(item))
+            }
+        } ?: return null
         return bitmap.toDrawable(context.resources)
-    }
-
-    private fun buildSourceSignature(source: Drawable): String {
-        val state = source.constantState?.hashCode() ?: 0
-        return "${source.javaClass.name}#$state#${source.intrinsicWidth}x${source.intrinsicHeight}"
     }
 
     private fun isNightMode(context: Context): Boolean {
@@ -676,7 +662,7 @@ class ThemedIcons : XposedModule() {
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
 
-        val baseIconSize = when {
+        val iconSize = when {
             // OEM PNG contains intrinsic padding: retain the proven 1.5x zoom.
             legacyBitmap != null -> (
                 size * Oos15MonochromeAssets.glyphScale(pkg)
@@ -691,7 +677,6 @@ class ThemedIcons : XposedModule() {
             // native and synthetic layers. Do not apply a second expansion.
             else -> size
         }
-        val iconSize = baseIconSize
         val offset = (size - iconSize) / 2
 
         runCatching {
