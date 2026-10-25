@@ -746,7 +746,7 @@ class ThemedIcons : XposedModule() {
 
     private inner class MonochromeIconFactory(
         private val icon: Drawable,
-        iconBitmapSize: Int,
+        private val iconBitmapSize: Int,
         private val resources: android.content.res.Resources
     ) {
         private val mBitmapSize: Int
