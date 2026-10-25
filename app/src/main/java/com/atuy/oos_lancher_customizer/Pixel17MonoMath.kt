@@ -20,6 +20,21 @@ internal object Pixel17MonoMath {
      * bundled artwork continue to use their existing scale.
      */
     internal const val GENERATED_OUTPUT_SCALE = 0.60f
+    internal const val SHORTCUT_OUTPUT_SCALE = 1.50f
+
+    /**
+     * Shortcut zoom has priority: shortcuts were too small before the new
+     * generated-icon scale was introduced. This keeps the shortcuts at 150%
+     * of their PREVIOUS capped 192px bounds, not 60% * 150%.
+     */
+    internal fun outputSize(previousSize: Int, shortcut: Boolean, synthetic: Boolean): Int {
+        val factor = when {
+            shortcut -> SHORTCUT_OUTPUT_SCALE
+            synthetic -> GENERATED_OUTPUT_SCALE
+            else -> 1f
+        }
+        return (previousSize * factor).roundToInt()
+    }
     // IEEE754 float value 0x3f109764 from Pixel 17-907 BaseIconFactory.<clinit>.
     private const val LEGACY_BASE_SCALE = 0.564810037612915f
 
