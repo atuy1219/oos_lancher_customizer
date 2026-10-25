@@ -526,7 +526,7 @@ class ThemedIcons : XposedModule() {
         val key = when {
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-synthetic-mono-v1"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-synthetic-mono-v2-scale060"
             else -> "$pkg|$night|$isShortcut|$sourceSig"
         }
 
@@ -678,8 +678,17 @@ class ThemedIcons : XposedModule() {
                 (1f + 2f * AdaptiveIconDrawable.getExtraInsetFraction())
             ).roundToInt()
         }
-        val iconSize =
+        // Keep the generated Pixel 17 shape/contrast logic unchanged. Scale
+        // only synthetic fallback icons to 60% of their PREVIOUS displayed
+        // bounds. Native monochrome, OEM15 and Pixel bundled glyphs are untouched.
+        val isSyntheticFallback = legacyBitmap == null && pixelBitmap == null && !isTrueAdaptive
+        val previousIconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
+        val iconSize = if (isSyntheticFallback) {
+            (previousIconSize * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).roundToInt()
+        } else {
+            previousIconSize
+        }
         val offset = (size - iconSize) / 2
 
         runCatching {
