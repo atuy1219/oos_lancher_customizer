@@ -15,26 +15,14 @@ import kotlin.math.roundToInt
  */
 internal object Pixel17MonoMath {
     /**
-     * Extra output zoom applied only to the generated monochrome fallback.
-     * The Pixel algorithm is unchanged; native monochrome, OOS15 and Pixel
-     * bundled artwork continue to use their existing scale.
+     * Shortcuts remain 1.5x by user choice. Regular synthetic icons no longer
+     * have a hard-coded 0.6x fudge factor: their dimensions now come from the
+     * Launcher3 visual IconNormalizer and adaptive mask geometry.
      */
-    internal const val GENERATED_OUTPUT_SCALE = 0.60f
     internal const val SHORTCUT_OUTPUT_SCALE = 1.50f
 
-    /**
-     * Shortcut zoom has priority: shortcuts were too small before the new
-     * generated-icon scale was introduced. This keeps the shortcuts at 150%
-     * of their PREVIOUS capped 192px bounds, not 60% * 150%.
-     */
-    internal fun outputSize(previousSize: Int, shortcut: Boolean, synthetic: Boolean): Int {
-        val factor = when {
-            shortcut -> SHORTCUT_OUTPUT_SCALE
-            synthetic -> GENERATED_OUTPUT_SCALE
-            else -> 1f
-        }
-        return (previousSize * factor).roundToInt()
-    }
+    internal fun outputSize(previousSize: Int, shortcut: Boolean): Int =
+        (previousSize * if (shortcut) SHORTCUT_OUTPUT_SCALE else 1f).roundToInt()
     // IEEE754 float value 0x3f109764 from Pixel 17-907 BaseIconFactory.<clinit>.
     private const val LEGACY_BASE_SCALE = 0.564810037612915f
 
