@@ -522,9 +522,11 @@ class ThemedIcons : XposedModule() {
         val hasNativeMono = (original as? AdaptiveIconDrawable)?.monochrome != null
         val hasPixel = !isShortcut && !hasLegacy && !hasNativeMono &&
             PixelLauncherThemedAssets.hasArtwork(pkg)
+        val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-synthetic-mono-v1"
             else -> "$pkg|$night|$isShortcut|$sourceSig"
         }
 
