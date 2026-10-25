@@ -31,7 +31,7 @@ import kotlin.math.sqrt
 internal object Pixel17IconNormalizer {
     private const val TAG = "Pixel17_Normalizer"
     private const val VISIBLE_ALPHA = 40
-    private const val CIRCLE_AREA_BY_RECT = Math.PI.toFloat() / 4f
+    private const val CIRCLE_AREA_BY_RECT = 0.7853982f
     private const val SQUARE_AREA_FACTOR = 375f / 576f
     private const val CIRCLE_AREA_FACTOR = 380f / 576f
     private const val SLOPE = (CIRCLE_AREA_FACTOR - SQUARE_AREA_FACTOR) /
