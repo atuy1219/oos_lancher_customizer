@@ -51,21 +51,17 @@ class Pixel17MonoMathTest {
     }
 
     @Test
-    fun regularSyntheticFallbackIsSixtyPercentOfPreviousSize() {
-        assertEquals(0.60f, Pixel17MonoMath.GENERATED_OUTPUT_SCALE, 0f)
-        assertEquals(173, Pixel17MonoMath.outputSize(288, shortcut = false, synthetic = true))
-        assertEquals(115, Pixel17MonoMath.outputSize(192, shortcut = false, synthetic = true))
+    fun syntheticFallbackNoLongerUsesUnconditionalSixtyPercentScale() {
+        // Regular icon geometry is supplied by the visual IconNormalizer.
+        assertEquals(192, Pixel17MonoMath.outputSize(192, shortcut = false))
+        assertEquals(176, Pixel17MonoMath.outputSize(176, shortcut = false))
     }
 
     @Test
-    fun shortcutIsOnePointFiveTimesPriorSizeRegardlessOfUnderlyingMonochromeSource() {
+    fun shortcutRetainsExplicitOnePointFiveTimesDisplayScale() {
         assertEquals(1.50f, Pixel17MonoMath.SHORTCUT_OUTPUT_SCALE, 0f)
-        // The old shortcut cap was 192px. Apply the extra 1.5x AFTER the cap.
-        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true, synthetic = true))
-        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true, synthetic = false))
-        // Non-shortcut native monotone glyphs must be unaffected.
-        assertEquals(192, Pixel17MonoMath.outputSize(192, shortcut = false, synthetic = false))
-        assertEquals(288, Pixel17MonoMath.outputSize(288, shortcut = false, synthetic = false))
+        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true))
+        assertEquals(264, Pixel17MonoMath.outputSize(176, shortcut = true))
     }
 
     @Test
