@@ -18,6 +18,7 @@ import android.graphics.Shader
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.InsetDrawable
 import android.graphics.drawable.Drawable
 import android.os.UserHandle
 import android.util.Log
@@ -628,17 +629,8 @@ class ThemedIcons : XposedModule() {
             else android.R.color.system_accent1_600
         )
 
-        val isAdaptive = original is AdaptiveIconDrawable
-        val isWrappedLegacyAdaptive =
-            isAdaptive && (original.background is ColorDrawable) &&
-                (original.foreground is BitmapDrawable)
-        val isTrueAdaptive = isAdaptive && original.monochrome != null
-        val isLikelyBitmapAdaptive =
-            isAdaptive && original.monochrome == null && (
-                original.background is BitmapDrawable ||
-                    original.foreground is BitmapDrawable ||
-                    original.foreground == null
-                )
+        val isTrueAdaptive =
+            original is AdaptiveIconDrawable && original.monochrome != null
 
         val monoDrawable: Drawable =
             if (legacyBitmap != null) {
@@ -648,8 +640,9 @@ class ThemedIcons : XposedModule() {
             } else if (pixelBitmap != null) {
                 BitmapDrawable(context.resources, pixelBitmap).mutate()
             } else {
-                val size = if (original.intrinsicWidth > 0) original.intrinsicWidth else 108
-                MonochromeIconFactory(original, size, context.resources).create()
+                // Pixel BaseIconFactory passes its fixed output icon size to
+                // MonochromeIconFactory, not the source app icon's intrinsic size.
+                MonochromeIconFactory(original, 192, context.resources).create()
             }
 
         val size = 192
@@ -663,13 +656,6 @@ class ThemedIcons : XposedModule() {
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
 
-        val monoIntrinsic =
-            if (monoDrawable.intrinsicWidth > 0 && monoDrawable.intrinsicHeight > 0) {
-                min(monoDrawable.intrinsicWidth, monoDrawable.intrinsicHeight)
-            } else {
-                size
-            }
-
         val baseIconSize = when {
             // OEM PNG contains intrinsic padding: retain the proven 1.5x zoom.
             legacyBitmap != null -> (
@@ -681,10 +667,14 @@ class ThemedIcons : XposedModule() {
             pixelBitmap != null -> (
                 size * PixelLauncherThemedAssets.GLYPH_SCALE
             ).roundToInt()
-            isTrueAdaptive -> (size * 1.50f).toInt()
-            isAdaptive && (isWrappedLegacyAdaptive || isLikelyBitmapAdaptive) -> size
-            isAdaptive -> (size * 1.50f).toInt()
-            else -> min(size, monoIntrinsic)
+            // Pixel MonoIconThemeController wraps both generated alpha masks
+            // and native monochrome layers in an InsetDrawable with a NEGATIVE
+            // AdaptiveIconDrawable extra inset. This applies to adaptive and
+            // legacy-wrapped icons alike, rather than scaling bitmap-backed
+            // adaptive icons differently.
+            else -> (size *
+                (1f + 2f * AdaptiveIconDrawable.getExtraInsetFraction())
+            ).roundToInt()
         }
         val iconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
@@ -717,7 +707,6 @@ class ThemedIcons : XposedModule() {
         private val resources: android.content.res.Resources
     ) {
         private val mBitmapSize: Int
-        private val mEdgePixelLength: Int
         private val mFlatBitmap: Bitmap
         private val mFlatCanvas: Canvas
         private val mAlphaBitmap: Bitmap
@@ -731,7 +720,6 @@ class ThemedIcons : XposedModule() {
             val extraFactor = AdaptiveIconDrawable.getExtraInsetFraction()
             val viewPortScale = 1f / (1 + 2 * extraFactor)
             mBitmapSize = (iconBitmapSize * 2 * viewPortScale).roundToInt()
-            mEdgePixelLength = mBitmapSize * (mBitmapSize - iconBitmapSize) / 2
             mPixels = ByteArray(mBitmapSize * mBitmapSize)
 
             mFlatBitmap = createBitmap(mBitmapSize, mBitmapSize)
@@ -763,14 +751,25 @@ class ThemedIcons : XposedModule() {
         }
 
         private fun convertMono() {
-            if (icon is AdaptiveIconDrawable) {
-                mFlatCanvas.drawColor(Color.BLACK)
-                drawDrawable(icon.background)
-                drawDrawable(icon.foreground)
+            // Pixel BaseIconFactory#wrapToAdaptiveIcon: nonadaptive icons are
+            // normalized within an AdaptiveIconDrawable, backed by white.
+            val source = if (icon is AdaptiveIconDrawable) {
+                icon
             } else {
-                mFlatCanvas.drawColor(Color.WHITE)
-                drawDrawable(icon)
+                val scale = Pixel17MonoMath.legacyWrappedScale(
+                    AdaptiveIconDrawable.getExtraInsetFraction()
+                )
+                val insets = Pixel17MonoMath.legacyInsets(
+                    icon.intrinsicWidth, icon.intrinsicHeight, scale
+                )
+                AdaptiveIconDrawable(
+                    ColorDrawable(Color.WHITE),
+                    InsetDrawable(icon, insets.left, insets.top, insets.left, insets.top)
+                )
             }
+            mFlatCanvas.drawColor(Color.BLACK)
+            drawDrawable(source.background)
+            drawDrawable(source.foreground)
             generateMono()
         }
 
@@ -788,33 +787,12 @@ class ThemedIcons : XposedModule() {
             buffer.rewind()
             mAlphaBitmap.copyPixelsToBuffer(buffer)
 
-            var min = 0xFF
-            var max = 0
-            for (b in mPixels) {
-                val v = b.toInt() and 0xFF
-                if (v < min) min = v
-                if (v > max) max = v
-            }
-
-            if (min < max) {
-                val range = (max - min).toFloat()
-                var sum = 0
-                for (i in 0 until mEdgePixelLength) {
-                    sum += (mPixels[i].toInt() and 0xFF)
-                    sum += (mPixels[mPixels.size - 1 - i].toInt() and 0xFF)
-                }
-                val edgeAverage = sum / (mEdgePixelLength * 2f)
-                val edgeMapped = (edgeAverage - min) / range
-                val flipColor = edgeMapped > 0.5f
-
-                for (i in mPixels.indices) {
-                    val p = mPixels[i].toInt() and 0xFF
-                    val p2 = ((p - min) * 0xFF / range).roundToInt()
-                    mPixels[i] = (if (flipColor) (255 - p2) else p2).toByte()
-                }
-                buffer.rewind()
-                mAlphaBitmap.copyPixelsFromBuffer(buffer)
-            }
+            // Pixel Launcher 17-907: normalize 0..255, then apply its two
+            // quadratic half-range curves. The previous OOS implementation's
+            // edge-pixel-driven polarity inversion does not exist in Pixel.
+            Pixel17MonoMath.normalizeAndSmooth(mPixels)
+            buffer.rewind()
+            mAlphaBitmap.copyPixelsFromBuffer(buffer)
         }
     }
 }
