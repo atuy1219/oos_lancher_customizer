@@ -14,19 +14,6 @@ import kotlin.math.roundToInt
  * BaseIconFactory.LEGACY_ICON_SCALE, then in an AdaptiveIconDrawable.
  */
 internal object Pixel17MonoMath {
-    // Size preference applies to generated artwork, never to its opaque matte
-    // or to a native monochrome layer. Shortcuts keep their requested 1.5x zoom.
-    internal const val SYNTHETIC_FOREGROUND_SCALE = 0.60f
-    internal const val SHORTCUT_OUTPUT_SCALE = 1.50f
-
-    internal fun foregroundScale(shortcut: Boolean): Float =
-        if (shortcut) 1f else SYNTHETIC_FOREGROUND_SCALE
-
-    internal fun layerSize(size: Int, extraInsetFraction: Float): Int =
-        (size * (1f + 2f * extraInsetFraction)).roundToInt()
-
-    internal fun outputSize(previousSize: Int, shortcut: Boolean): Int =
-        (previousSize * (if (shortcut) SHORTCUT_OUTPUT_SCALE else 1f)).roundToInt()
     // IEEE754 float value 0x3f109764 from Pixel 17-907 BaseIconFactory.<clinit>.
     private const val LEGACY_BASE_SCALE = 0.564810037612915f
 

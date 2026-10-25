@@ -31,6 +31,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     packaging {
         resources {
             merges += "META-INF/xposed/*"
@@ -42,4 +46,5 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     compileOnly(libs.libxposed.api)
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.17")
 }

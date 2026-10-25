@@ -51,23 +51,6 @@ class Pixel17MonoMathTest {
     }
 
     @Test
-    fun fullBleedLayerIsNeverShrunkByGeneratedForegroundPreference() {
-        // The alpha matte covers the viewport even when its glyph is reduced.
-        assertEquals(288, Pixel17MonoMath.layerSize(192, 0.25f))
-        assertEquals(0.60f, Pixel17MonoMath.foregroundScale(false), 0f)
-        assertEquals(1f, Pixel17MonoMath.foregroundScale(true), 0f)
-        assertEquals(192, Pixel17MonoMath.outputSize(192, shortcut = false))
-        assertEquals(176, Pixel17MonoMath.outputSize(176, shortcut = false))
-    }
-
-    @Test
-    fun shortcutRetainsExplicitOnePointFiveTimesDisplayScale() {
-        assertEquals(1.50f, Pixel17MonoMath.SHORTCUT_OUTPUT_SCALE, 0f)
-        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true))
-        assertEquals(264, Pixel17MonoMath.outputSize(176, shortcut = true))
-    }
-
-    @Test
     fun originalOos15AndPixelExplicitScalesAreUnaffected() {
         assertEquals(1.5f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
         assertEquals(0.6f, PixelLauncherThemedAssets.GLYPH_SCALE, 0.000001f)

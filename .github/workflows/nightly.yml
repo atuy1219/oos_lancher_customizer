@@ -95,6 +95,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: oos-launcher-customizer-nightly
-          path: oos-launcher-customizer-nightly.apk
+          path: |
+            oos-launcher-customizer-nightly.apk
+            app/build/reports/pixel17/*.png
           if-no-files-found: error
 
