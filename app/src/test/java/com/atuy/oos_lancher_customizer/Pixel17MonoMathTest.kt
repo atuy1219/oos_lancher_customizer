@@ -51,14 +51,21 @@ class Pixel17MonoMathTest {
     }
 
     @Test
-    fun syntheticFallbackOnlyHasSixtyPercentExtraScaling() {
+    fun regularSyntheticFallbackIsSixtyPercentOfPreviousSize() {
         assertEquals(0.60f, Pixel17MonoMath.GENERATED_OUTPUT_SCALE, 0f)
-        // The former 1.5x icon occupies 288px before circle masking;
-        // its new raster bounds are 173px, with the 192px theme circle unchanged.
-        assertEquals(173, (288 * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).toDouble()
-            .let { kotlin.math.round(it).toInt() })
-        // Shortcut paths are capped at 192px first, then scaled to 60%.
-        assertEquals(115, kotlin.math.round(192 * Pixel17MonoMath.GENERATED_OUTPUT_SCALE).toInt())
+        assertEquals(173, Pixel17MonoMath.outputSize(288, shortcut = false, synthetic = true))
+        assertEquals(115, Pixel17MonoMath.outputSize(192, shortcut = false, synthetic = true))
+    }
+
+    @Test
+    fun shortcutIsOnePointFiveTimesPriorSizeRegardlessOfUnderlyingMonochromeSource() {
+        assertEquals(1.50f, Pixel17MonoMath.SHORTCUT_OUTPUT_SCALE, 0f)
+        // The old shortcut cap was 192px. Apply the extra 1.5x AFTER the cap.
+        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true, synthetic = true))
+        assertEquals(288, Pixel17MonoMath.outputSize(192, shortcut = true, synthetic = false))
+        // Non-shortcut native monotone glyphs must be unaffected.
+        assertEquals(192, Pixel17MonoMath.outputSize(192, shortcut = false, synthetic = false))
+        assertEquals(288, Pixel17MonoMath.outputSize(288, shortcut = false, synthetic = false))
     }
 
     @Test
