@@ -51,8 +51,11 @@ class Pixel17MonoMathTest {
     }
 
     @Test
-    fun syntheticFallbackNoLongerUsesUnconditionalSixtyPercentScale() {
-        // Regular icon geometry is supplied by the visual IconNormalizer.
+    fun fullBleedLayerIsNeverShrunkByGeneratedForegroundPreference() {
+        // The alpha matte covers the viewport even when its glyph is reduced.
+        assertEquals(288, Pixel17MonoMath.layerSize(192, 0.25f))
+        assertEquals(0.60f, Pixel17MonoMath.foregroundScale(false), 0f)
+        assertEquals(1f, Pixel17MonoMath.foregroundScale(true), 0f)
         assertEquals(192, Pixel17MonoMath.outputSize(192, shortcut = false))
         assertEquals(176, Pixel17MonoMath.outputSize(176, shortcut = false))
     }

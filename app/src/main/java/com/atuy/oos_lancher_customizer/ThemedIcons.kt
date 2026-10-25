@@ -507,25 +507,6 @@ class ThemedIcons : XposedModule() {
         return output
     }
 
-    /**
-     * Match Pixel BaseIconFactory.ClippedMonoDrawable by clipping the
-     * foreground/background result with the platform adaptive icon mask,
-     * rather than assuming the mask is always a mathematical circle.
-     * Original OEM/Pixel bundle draw paths intentionally retain circleMasked.
-     */
-    private fun adaptiveIconMasked(bitmap: Bitmap): Bitmap {
-        val size = min(bitmap.width, bitmap.height)
-        val output = createBitmap(size, size)
-        val canvas = Canvas(output)
-        val crop = AdaptiveIconDrawable(ColorDrawable(Color.BLACK), null)
-        crop.setBounds(0, 0, size, size)
-        val save = canvas.save()
-        canvas.clipPath(crop.iconMask)
-        canvas.drawBitmap(bitmap, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
-        canvas.restoreToCount(save)
-        return output
-    }
-
     private fun themedDrawable(
         context: Context,
         pkg: String,
@@ -543,11 +524,11 @@ class ThemedIcons : XposedModule() {
             PixelLauncherThemedAssets.hasArtwork(pkg)
         val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
-            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v4-normalized"
+            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v5-circle"
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-normalized-mono-v3-mask"
-            else -> "$pkg|$night|$isShortcut|$sourceSig"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-mono-v4-fullbleed"
+            else -> "$pkg|$night|$isShortcut|$sourceSig|native-mono-v4-extra-inset"
         }
 
         if (failedKeys.get(key) == true) {
@@ -664,7 +645,7 @@ class ThemedIcons : XposedModule() {
             } else {
                 // Pixel BaseIconFactory passes its fixed output icon size to
                 // MonochromeIconFactory, not the source app icon's intrinsic size.
-                MonochromeIconFactory(original, 192, context.resources).create()
+                MonochromeIconFactory(original, 192, context.resources, isShortcut).create()
             }
 
         val size = 192
@@ -673,14 +654,7 @@ class ThemedIcons : XposedModule() {
 
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
         val radius = size * 0.5f
-        if (legacyBitmap != null || pixelBitmap != null) {
-            // Keep the already approved OOS15 and Pixel-specific icons intact.
-            canvas.drawCircle(size * 0.5f, size * 0.5f, radius, bgPaint)
-        } else {
-            // The platform mask, rather than a hard-coded circle, is applied
-            // to both layers when the rendered fallback is complete.
-            canvas.drawColor(bgColor)
-        }
+        canvas.drawCircle(size * 0.5f, size * 0.5f, radius, bgPaint)
 
         monoDrawable.setTint(iconColor)
         monoDrawable.setTintMode(PorterDuff.Mode.SRC_IN)
@@ -696,19 +670,17 @@ class ThemedIcons : XposedModule() {
             pixelBitmap != null -> (
                 size * PixelLauncherThemedAssets.GLYPH_SCALE
             ).roundToInt()
-            // AOSP BaseIconFactory draws normalized adaptive icons at their
-            // normalized mask area. This replaces the unsupported fixed 1.5x
-            // assumption for generated masks and native monochrome layers.
-            else -> (size * Pixel17IconNormalizer.adaptiveMaskScale(size)).roundToInt()
+            // A monochrome layer uses the adaptive foreground viewport, which
+            // includes extra inset on every side. Compensate that inset here.
+            // IconNormalizer's OUTER icon scale cannot replace this transform:
+            // doing so shrinks native glyphs and exposes the generated bitmap's
+            // rectangular boundary inside the final icon mask.
+            else -> Pixel17MonoMath.layerSize(
+                size, AdaptiveIconDrawable.getExtraInsetFraction()
+            )
         }
-        // Retain Pixel 17's monochrome generation, changing only the raster
-        // bounds: ordinary synthetic icons at 0.6x, and shortcuts at 1.5x.
-        // Multiply AFTER the original shortcut cap, otherwise the previous
-        // min(size, ...) limit would silently discard the requested zoom.
-        // Native app glyphs and OEM/Pixel artwork keep their original scale.
-        // Normal app glyphs now follow IconNormalizer's computed adaptive
-        // mask scale, with the legacy source's hull normalized before wrapping.
-        // Only shortcuts retain their explicitly requested 1.5x extra zoom.
+        // The generated foreground is resized before grayscale conversion;
+        // its opaque background must keep covering the entire layer.
         val previousIconSize =
             if (isShortcut) min(size, (baseIconSize * 2.3f).toInt()) else baseIconSize
         val iconSize = Pixel17MonoMath.outputSize(previousIconSize, isShortcut)
@@ -732,17 +704,14 @@ class ThemedIcons : XposedModule() {
             }
         }
 
-        return if (legacyBitmap != null || pixelBitmap != null) {
-            circleMasked(bitmap)
-        } else {
-            adaptiveIconMasked(bitmap)
-        }
+        return circleMasked(bitmap)
     }
 
     private inner class MonochromeIconFactory(
         private val icon: Drawable,
         private val iconBitmapSize: Int,
-        private val resources: android.content.res.Resources
+        private val resources: android.content.res.Resources,
+        private val isShortcut: Boolean
     ) {
         private val mBitmapSize: Int
         private val mFlatBitmap: Bitmap
@@ -818,7 +787,16 @@ class ThemedIcons : XposedModule() {
             }
             mFlatCanvas.drawColor(Color.BLACK)
             drawDrawable(source.background)
-            drawDrawable(source.foreground)
+            // Keep background full bleed. Scaling the finished alpha bitmap
+            // also scales its opaque matte and leaves a visible square edge.
+            val save = mFlatCanvas.save()
+            val scale = Pixel17MonoMath.foregroundScale(isShortcut)
+            mFlatCanvas.scale(scale, scale, mBitmapSize / 2f, mBitmapSize / 2f)
+            try {
+                drawDrawable(source.foreground)
+            } finally {
+                mFlatCanvas.restoreToCount(save)
+            }
             generateMono()
         }
 

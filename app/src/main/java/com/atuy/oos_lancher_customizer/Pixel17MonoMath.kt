@@ -14,12 +14,16 @@ import kotlin.math.roundToInt
  * BaseIconFactory.LEGACY_ICON_SCALE, then in an AdaptiveIconDrawable.
  */
 internal object Pixel17MonoMath {
-    /**
-     * Shortcuts remain 1.5x by user choice. Regular synthetic icons no longer
-     * have a hard-coded 0.6x fudge factor: their dimensions now come from the
-     * Launcher3 visual IconNormalizer and adaptive mask geometry.
-     */
+    // Size preference applies to generated artwork, never to its opaque matte
+    // or to a native monochrome layer. Shortcuts keep their requested 1.5x zoom.
+    internal const val SYNTHETIC_FOREGROUND_SCALE = 0.60f
     internal const val SHORTCUT_OUTPUT_SCALE = 1.50f
+
+    internal fun foregroundScale(shortcut: Boolean): Float =
+        if (shortcut) 1f else SYNTHETIC_FOREGROUND_SCALE
+
+    internal fun layerSize(size: Int, extraInsetFraction: Float): Int =
+        (size * (1f + 2f * extraInsetFraction)).roundToInt()
 
     internal fun outputSize(previousSize: Int, shortcut: Boolean): Int =
         (previousSize * (if (shortcut) SHORTCUT_OUTPUT_SCALE else 1f)).roundToInt()
