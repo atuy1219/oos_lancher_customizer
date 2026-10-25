@@ -1,7 +1,7 @@
 package com.atuy.oos_lancher_customizer
 
 import android.content.BroadcastReceiver
-import android.content.ComponentCallbacks
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -43,9 +43,12 @@ internal class IconEnvironment(
         }
     }
 
-    private val configuration = object : ComponentCallbacks {
+    private val configuration = object : ComponentCallbacks2 {
         override fun onConfigurationChanged(newConfig: Configuration) { changed() }
         override fun onLowMemory() { trim() }
+        override fun onTrimMemory(level: Int) {
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) trim()
+        }
     }
     private val wallpaper = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) { changed() }

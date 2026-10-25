@@ -64,4 +64,16 @@ class ThemedSnapshotCacheTest {
         assertFalse(ThemedIconPolicy.isThemedDrawable(drawable))
         assertTrue(ThemedIconPolicy.isKnownThemedDrawable(drawable))
     }
+    @Test fun memoryTrimDropsOldItemsWithoutRecopyingVisibleSnapshots() {
+        val copies = AtomicInteger()
+        val drawable = CountedDrawable(copies)
+        ThemedIconPolicy.rememberDrawable(drawable, Item())
+        ThemedIconPolicy.trimSnapshots()
+        assertNull(ThemedIconPolicy.themedStateFor(Item()))
+        assertTrue(ThemedIconPolicy.isThemedDrawable(drawable))
+        ThemedIconPolicy.rememberDrawable(drawable, Item())
+        assertNotNull(ThemedIconPolicy.themedStateFor(Item()))
+        assertEquals(1, copies.get())
+    }
+
 }

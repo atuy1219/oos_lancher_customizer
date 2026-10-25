@@ -76,6 +76,8 @@ internal object ThemedIconPolicy {
 
     fun isKnownThemedDrawable(drawable: Drawable): Boolean = themedDrawables.containsKey(drawable)
 
+    fun trimSnapshots() { synchronized(themedStates) { themedStates.clear() } }
+
     private val invalidators = CopyOnWriteArrayList<() -> Unit>()
 
     fun onThemeInvalidated(invalidate: () -> Unit) { invalidators.add(invalidate) }

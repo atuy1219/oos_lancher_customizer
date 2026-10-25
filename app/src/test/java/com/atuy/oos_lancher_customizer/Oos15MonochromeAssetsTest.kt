@@ -30,16 +30,7 @@ class Oos15MonochromeAssetsTest {
         }
     }
     @Test fun allOos15GlyphsUseUniformOnePointFiveScale() {
-        for (pkg in listOf(
-            "com.oneplus.gallery",
-            "com.oneplus.filemanager",
-            "com.oplus.camera",
-            "com.oplus.consumerIRApp",
-            "com.android.contacts",
-            "com.android.settings"
-        )) {
-            assertEquals(pkg, 1.50f, Oos15MonochromeAssets.glyphScale(pkg), 0f)
-        }
+        assertEquals(1.50f, Oos15MonochromeAssets.GLYPH_SCALE, 0f)
     }
     @Test fun distinguishDialerFromContactsComponent() {
         assertTrue(Oos15MonochromeAssets.isDialerActivityName("com.android.contacts.activities.DialtactsActivity"))

@@ -2,6 +2,7 @@ package com.atuy.oos_lancher_customizer
 
 import android.app.Application
 import android.content.Intent
+import android.content.ComponentCallbacks2
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -30,8 +31,12 @@ class IconEnvironmentTest {
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals(1, invalidations)
         assertEquals(1, refreshes)
-        app.onLowMemory()
+        app.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE)
+        assertEquals(0, trims)
+        app.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)
         assertEquals(1, trims)
+        app.onLowMemory()
+        assertEquals(2, trims)
     }
 
     @Test fun wallpaperBroadcastWithUnchangedPaletteDoesNotReloadIcons() {

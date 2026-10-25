@@ -71,7 +71,7 @@ class ThemedIcons : XposedModule() {
                     ThemedIconPolicy.invalidateTheme()
                 },
                 refresh = ::refreshVisibleIcons,
-                trim = { iconCache.clear() }
+                trim = { iconCache.clear(); ThemedIconPolicy.trimSnapshots() }
             )
         }
     }
@@ -81,10 +81,13 @@ class ThemedIcons : XposedModule() {
     ): Binding? {
         val key = ThemedIconPolicy.itemKey(item)
         if (ThemedIconPolicy.isKnownThemedDrawable(drawable)) return map[view]?.takeIf { it.key == key }
-        return originalBinding(key, drawable).also { map[view] = it }
+        return originalBinding(key, drawable, resolveItemType(item) != 0).also { map[view] = it }
     }
 
-    private fun originalBinding(key: String, drawable: Drawable): Binding {
+    private fun originalBinding(key: String, drawable: Drawable, keepState: Boolean = true): Binding {
+        // Regular apps can be reloaded from their manifest; do not retain a
+        // second full-color bitmap merely to refresh their themed view.
+        if (!keepState) return Binding(key, null, WeakReference(drawable), null)
         val bitmap = (drawable as? BitmapDrawable)?.bitmap
             ?: (CachedReflection.call(drawable, "getBitmap") as? Bitmap)
         return Binding(key, drawable.constantState, WeakReference(drawable),
@@ -331,7 +334,7 @@ class ThemedIcons : XposedModule() {
         val key = ThemedIconPolicy.itemKey(itemInfo)
         val original = if (ThemedIconPolicy.isKnownThemedDrawable(drawable)) {
             previews[previewParams]?.source?.takeIf { it.key == key }
-        } else originalBinding(key, drawable)
+        } else originalBinding(key, drawable, resolveItemType(itemInfo) != 0)
         if (owner != null) previews[previewParams] = PreviewBinding(WeakReference(owner), itemInfo, original)
         if (ThemedIconPolicy.isThemedDrawable(drawable)) {
             ThemedIconPolicy.rememberDrawable(drawable, itemInfo)
@@ -600,11 +603,7 @@ class ThemedIcons : XposedModule() {
         if (drawable is BitmapDrawable) {
             return toSoftwareBitmap(drawable.bitmap)
         }
-        val reflected = runCatching {
-            val method = drawable.javaClass.getMethod("getBitmap")
-            method.isAccessible = true
-            method.invoke(drawable) as? Bitmap
-        }.getOrNull()
+        val reflected = CachedReflection.call(drawable, "getBitmap") as? Bitmap
         return toSoftwareBitmap(reflected)
     }
 
@@ -665,7 +664,7 @@ class ThemedIcons : XposedModule() {
         val iconSize = when {
             // OEM PNG contains intrinsic padding: retain the proven 1.5x zoom.
             legacyBitmap != null -> (
-                size * Oos15MonochromeAssets.glyphScale(pkg)
+                size * Oos15MonochromeAssets.GLYPH_SCALE
             ).roundToInt()
             // Both Pixel and Oplus IconProvider pad theme fallback vectors
             // by 20% on each side. AdaptiveIconDrawable's extra foreground

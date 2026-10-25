@@ -17,7 +17,7 @@ class PixelLauncherThemedAssetsTest {
         assertEquals(0.60f, PixelLauncherThemedAssets.GLYPH_SCALE, 0f)
         assertEquals(115, (192 * PixelLauncherThemedAssets.GLYPH_SCALE).roundToInt())
         assertEquals(38, (192 - 115) / 2)
-        assertEquals(1.50f, Oos15MonochromeAssets.glyphScale("com.oneplus.gallery"), 0f)
+        assertEquals(1.50f, Oos15MonochromeAssets.GLYPH_SCALE, 0f)
     }
 
     @Test
