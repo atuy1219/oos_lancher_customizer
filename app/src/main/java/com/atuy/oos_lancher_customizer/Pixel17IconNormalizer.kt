@@ -59,7 +59,7 @@ internal object Pixel17IconNormalizer {
      */
     private fun convexBorder(coords: FloatArray, direction: Int, firstRow: Int, lastRow: Int) {
         val angles = FloatArray(coords.size - 1)
-        var first = firstRow
+        val first = firstRow
         var last = -1
         var lastAngle = Float.MAX_VALUE
         for (i in firstRow + 1..lastRow) {
@@ -197,8 +197,17 @@ internal object Pixel17IconNormalizer {
                     if (y > bottom) bottom = y
                 }
             }
+            // Drawable.getIconMask() uses pixel-space coordinates, whereas
+            // Launcher3's shape matching expects normalized 0..1 geometry.
+            val unitMask = maskPath?.let { path ->
+                Path().also { normalized ->
+                    val matrix = Matrix()
+                    matrix.setScale(1f / iconSize, 1f / iconSize)
+                    path.transform(matrix, normalized)
+                }
+            }
             val match = right >= left && bottom >= top &&
-                matchesShape(raw, maxSize, left, top, right, bottom, maskPath)
+                matchesShape(raw, maxSize, left, top, right, bottom, unitMask)
             Result(measureAlpha(raw, maxSize, w, h), match)
         }.onFailure {
             Log.w(TAG, "Cannot normalize source drawable ${icon.javaClass.name}; using scale=1", it)
