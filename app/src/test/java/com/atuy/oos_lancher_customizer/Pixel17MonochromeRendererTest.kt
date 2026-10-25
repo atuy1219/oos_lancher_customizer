@@ -117,4 +117,43 @@ class Pixel17MonochromeRendererTest {
         assertTrue(Color.alpha(alpha.getPixel(side / 2, side / 2)) > 250)
         record("native-monochrome", alpha)
     }
+    @Test
+    fun brightGeneratedMarginUsesThemeBackgroundWithoutChangingGeometry() {
+        val pixel = Pixel17MonochromeRenderer.render(Glyph(), side, resources)
+        val themed = Pixel17MonochromeRenderer.render(
+            Glyph(), side, resources, matchThemeBackground = true
+        )
+        assertEquals(0, Color.alpha(themed.getPixel(0, 0)))
+        assertEquals(255, Color.alpha(themed.getPixel(side / 2, side / 2)))
+        assertEquals(visibleBounds(pixel, false), visibleBounds(themed, true))
+        for (y in 0 until side) for (x in 0 until side) {
+            assertEquals(255 - Color.alpha(pixel.getPixel(x, y)),
+                Color.alpha(themed.getPixel(x, y)))
+        }
+        record("theme-background-legacy", themed)
+    }
+
+    @Test
+    fun darkGeneratedMarginAlreadyShowsThemeBackgroundAndIsUnchanged() {
+        val icon = AdaptiveIconDrawable(ColorDrawable(Color.BLACK),
+            Glyph(fraction = 0.4f, color = Color.WHITE))
+        val pixel = Pixel17MonochromeRenderer.render(icon, side, resources)
+        val themed = Pixel17MonochromeRenderer.render(
+            icon, side, resources, matchThemeBackground = true
+        )
+        assertTrue(pixel.sameAs(themed))
+        record("theme-background-adaptive", themed)
+    }
+
+    @Test
+    fun nativeMonochromeRemainsUnchangedWhenGeneratedMarginsAreAligned() {
+        val icon = AdaptiveIconDrawable(ColorDrawable(Color.RED), Glyph(color = Color.BLUE),
+            Glyph(fraction = 0.4f, color = Color.WHITE))
+        val pixel = Pixel17MonochromeRenderer.render(icon, side, resources)
+        val themed = Pixel17MonochromeRenderer.render(
+            icon, side, resources, matchThemeBackground = true
+        )
+        assertTrue(pixel.sameAs(themed))
+    }
+
 }

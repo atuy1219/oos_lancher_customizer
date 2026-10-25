@@ -553,10 +553,10 @@ class ThemedIcons : XposedModule() {
             PixelLauncherThemedAssets.hasArtwork(pkg)
         val hasSynthetic = !hasLegacy && !hasPixel && !hasNativeMono
         val key = when {
-            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v6-raw-source"
+            isShortcut -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-shortcut-v7-themed-margin"
             hasLegacy -> "$pkg|$night|$isShortcut|$sourceSig|oos15-asset-v3-scale150|${component?.className}"
             hasPixel -> "$pkg|$night|$isShortcut|$sourceSig|pixel-theme-17-907-inset20-scale060|${component?.className}"
-            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-mono-v5-raw-source"
+            hasSynthetic -> "$pkg|$night|$isShortcut|$sourceSig|pixel17-mono-v6-themed-margin"
             else -> "$pkg|$night|$isShortcut|$sourceSig|native-mono-v5-raw-source"
         }
 
@@ -649,11 +649,14 @@ class ThemedIcons : XposedModule() {
             pixelBitmap != null -> BitmapDrawable(context.resources, pixelBitmap).mutate()
             else -> {
                 val alpha = runCatching {
-                    Pixel17MonochromeRenderer.render(original, 192, context.resources)
+                    Pixel17MonochromeRenderer.render(
+                        original, 192, context.resources, matchThemeBackground = true
+                    )
                 }.recoverCatching {
                     val software = extractSoftwareBitmap(original) ?: throw it
                     Pixel17MonochromeRenderer.render(
-                        BitmapDrawable(context.resources, software), 192, context.resources
+                        BitmapDrawable(context.resources, software), 192, context.resources,
+                        matchThemeBackground = true
                     )
                 }.onFailure {
                     moduleLog("skip Pixel mono generation pkg=$pkg: ${it.message}")

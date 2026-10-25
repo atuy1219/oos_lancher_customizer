@@ -19,7 +19,10 @@ import kotlin.math.roundToInt
 
 /** Geometry decoded from Pixel Launcher 17-907, not an older Launcher3 normalizer. */
 internal object Pixel17MonochromeRenderer {
-    fun render(source: Drawable, size: Int, resources: Resources): Bitmap {
+    fun render(
+        source: Drawable, size: Int, resources: Resources,
+        matchThemeBackground: Boolean = false
+    ): Bitmap {
         // Work on a private drawable: AdaptiveIconDrawable updates child bounds.
         val icon = source.constantState?.newDrawable(resources)?.mutate() ?: source
         val oldBounds = Rect(icon.bounds)
@@ -33,10 +36,47 @@ internal object Pixel17MonochromeRenderer {
             val inset = InsetDrawable(layer, -extra)
             inset.setBounds(0, 0, size, size)
             inset.draw(Canvas(bitmap))
+            if (matchThemeBackground && native == null) alignGeneratedBackground(bitmap)
             return bitmap
         } finally {
             icon.bounds = oldBounds
         }
+    }
+
+    /**
+     * Pixel's bright generated matte paints the foreground tint over the margin.
+     * Choose alpha polarity from the perimeter so that matte becomes transparent
+     * and the existing themed background shows through. Geometry is unchanged.
+     * Native monochrome, OEM artwork and Pixel vectors never enter this path.
+     */
+    private fun alignGeneratedBackground(bitmap: Bitmap) {
+        val width = bitmap.width
+        val height = bitmap.height
+        val stride = bitmap.rowBytes
+        val pixels = ByteArray(stride * height)
+        bitmap.copyPixelsToBuffer(ByteBuffer.wrap(pixels))
+        val histogram = IntArray(256)
+        for (x in 0 until width) {
+            histogram[pixels[x].toInt() and 255]++
+            histogram[pixels[(height - 1) * stride + x].toInt() and 255]++
+        }
+        for (y in 1 until height - 1) {
+            histogram[pixels[y * stride].toInt() and 255]++
+            histogram[pixels[y * stride + width - 1].toInt() and 255]++
+        }
+        // A median resists a glyph or badge touching part of the icon perimeter.
+        val count = histogram.sum()
+        var cumulative = 0
+        val background = histogram.indices.first { value ->
+            cumulative += histogram[value]
+            cumulative * 2 >= count
+        }
+        if (background < 128) return
+        for (y in 0 until height) for (x in 0 until width) {
+            val index = y * stride + x
+            pixels[index] = (255 - (pixels[index].toInt() and 255)).toByte()
+        }
+        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
     }
 
     private fun generate(icon: Drawable, size: Int, resources: Resources, extra: Float): Drawable {
