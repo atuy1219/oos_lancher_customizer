@@ -466,7 +466,7 @@ class ThemedIcons : XposedModule() {
             )
             val raw = res.getDrawableForDensity(
                 manifest.iconResource, context.resources.displayMetrics.densityDpi, null
-            )
+            ) ?: return@runCatching null
             moduleLog("raw icon pkg=${component.packageName} type=${raw.javaClass.name} " +
                 "nativeMono=${(raw as? AdaptiveIconDrawable)?.monochrome != null}")
             raw
@@ -622,23 +622,6 @@ class ThemedIcons : XposedModule() {
         return toSoftwareBitmap(reflected)
     }
 
-    private fun drawDrawableSafely(drawable: Drawable, canvas: Canvas, size: Int): Boolean {
-        return runCatching {
-            drawable.setBounds(0, 0, size, size)
-            drawable.draw(canvas)
-            true
-        }.getOrElse { error ->
-            val message = error.message ?: ""
-            if (!message.contains("hardware bitmaps", ignoreCase = true)) return false
-
-            val softwareBitmap = extractSoftwareBitmap(drawable) ?: return false
-            val src = Rect(0, 0, softwareBitmap.width, softwareBitmap.height)
-            val dst = Rect(0, 0, size, size)
-            canvas.drawBitmap(softwareBitmap, src, dst, null)
-            true
-        }
-    }
-
     private fun generateRawThemedBitmap(
         context: Context,
         pkg: String,
@@ -664,8 +647,19 @@ class ThemedIcons : XposedModule() {
         val monoDrawable: Drawable = when {
             legacyBitmap != null -> BitmapDrawable(context.resources, legacyBitmap).mutate()
             pixelBitmap != null -> BitmapDrawable(context.resources, pixelBitmap).mutate()
-            else -> BitmapDrawable(context.resources,
-                Pixel17MonochromeRenderer.render(original, 192, context.resources))
+            else -> {
+                val alpha = runCatching {
+                    Pixel17MonochromeRenderer.render(original, 192, context.resources)
+                }.recoverCatching {
+                    val software = extractSoftwareBitmap(original) ?: throw it
+                    Pixel17MonochromeRenderer.render(
+                        BitmapDrawable(context.resources, software), 192, context.resources
+                    )
+                }.onFailure {
+                    moduleLog("skip Pixel mono generation pkg=$pkg: ${it.message}")
+                }.getOrNull() ?: return null
+                BitmapDrawable(context.resources, alpha)
+            }
         }
 
         val size = 192
