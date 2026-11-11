@@ -42,6 +42,18 @@ class IconBitmapCacheTest {
         assertSame(fresh, cache.getOrLoad("app") { fail("fresh result must be cached"); null })
     }
 
+    @Test fun obsoleteRenderIsRecycledWhenThemeChangesDuringLoad() {
+        val cache = IconBitmapCache()
+        val discarded = mutableListOf<Bitmap>()
+        val result = cache.getOrLoad("obsolete") {
+            cache.clear()
+            bitmap().also { discarded.add(it) }
+        }
+        assertNull(result)
+        assertEquals(2, discarded.size)
+        assertTrue(discarded.all { it.isRecycled })
+    }
+
     @Test fun bitmapMemoryBudgetEvictsLeastRecentlyUsedEntry() {
         val sample = bitmap()
         val cache = IconBitmapCache(sample.allocationByteCount)

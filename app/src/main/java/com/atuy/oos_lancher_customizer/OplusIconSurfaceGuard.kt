@@ -38,7 +38,7 @@ import java.util.WeakHashMap
 class OplusIconSurfaceGuard : XposedModule() {
 
     companion object {
-        private const val TAG = "OOS16_ThemedSurfaceGuard"
+        private const val TAG = "OOS17_ThemedSurfaceGuard"
         private const val TARGET_PACKAGE = "com.android.launcher"
         private const val BTV_CLASS = "com.android.launcher3.BubbleTextView"
         private const val PREVIEW_MANAGER_CLASS =
@@ -47,6 +47,14 @@ class OplusIconSurfaceGuard : XposedModule() {
             "com.android.launcher3.anim.iconsurfacemanager.IconViewManager"
         private const val ICON_SURFACE_RECORD_CLASS =
             "com.android.launcher3.anim.iconsurfacemanager.IconSurfaceRecord"
+        private const val MODERN_ICON_LOADER_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.loader.IconDrawableLoader"
+        private const val MODERN_ICON_SURFACE_RECORD_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.surface.IconSurfaceRecord"
+        private const val LEGACY_CALLBACK_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.IconViewCallback"
+        private const val MODERN_CALLBACK_CLASS =
+            "com.android.launcher3.anim.iconsurfacemanager.loader.IconViewCallback"
     }
 
     @Volatile
@@ -88,39 +96,43 @@ class OplusIconSurfaceGuard : XposedModule() {
     }
 
     private fun installHooks(classLoader: ClassLoader) {
-        // System Launcher 17.3.12 replaces these classes with the new
-        // iconsurfacemanager.loader/surface pipeline. Do not leave partial hooks
-        // installed or report a critical failure on that build.
-        val managerClass = runCatching {
+        // ColorOS 17 uses loader/surface instead of the legacy IconViewManager.
+        // Use exact classes from the running launcher rather than an OS version string.
+        val modernLoader = runCatching {
+            Class.forName(MODERN_ICON_LOADER_CLASS, false, classLoader)
+        }.getOrNull()
+        val modernRecord = runCatching {
+            Class.forName(MODERN_ICON_SURFACE_RECORD_CLASS, false, classLoader)
+        }.getOrNull()
+        val modern = modernLoader != null && modernRecord != null
+
+        val legacyManager = if (!modern) runCatching {
             Class.forName(ICON_VIEW_MANAGER_CLASS, false, classLoader)
-        }.getOrNull()
-        val recordClass = runCatching {
+        }.getOrNull() else null
+        val legacyRecord = if (!modern) runCatching {
             Class.forName(ICON_SURFACE_RECORD_CLASS, false, classLoader)
-        }.getOrNull()
-        if (managerClass == null || recordClass == null) {
-            moduleLog("legacy IconSurface pipeline unavailable; preserving native surface rendering")
+        }.getOrNull() else null
+        if (!modern && (legacyManager == null || legacyRecord == null)) {
+            moduleLog("No supported IconSurface pipeline; preserving native rendering")
             return
         }
 
+        // This capture layer is shared by both pipelines. The ordering matters:
+        // ThemedIcons rewrites the BubbleTextView argument before this lower-priority hook.
         val bubbleClass = Class.forName(BTV_CLASS, false, classLoader)
         hookAllNamedMethods(
-            bubbleClass,
-            "setIcon",
-            "surface-capture-bubble",
+            bubbleClass, "setIcon", "surface-capture-bubble",
             XposedInterface.PRIORITY_LOWEST
         ) { chain ->
             val args = chain.args.toTypedArray()
             captureThemedBubbleArgument(chain.thisObject, args)
             chain.proceed(args)
         }
-        moduleLog("hooked BubbleTextView#setIcon exact themed capture")
 
         runCatching {
             val previewClass = Class.forName(PREVIEW_MANAGER_CLASS, false, classLoader)
             hookAllNamedMethods(
-                previewClass,
-                "setDrawable",
-                "surface-capture-preview",
+                previewClass, "setDrawable", "surface-capture-preview",
                 XposedInterface.PRIORITY_HIGHEST
             ) { chain ->
                 val args = chain.args.toTypedArray()
@@ -128,53 +140,78 @@ class OplusIconSurfaceGuard : XposedModule() {
                 captureThemedPreviewResult(chain.thisObject, args)
                 result
             }
-            moduleLog("hooked PreviewItemManager#setDrawable exact themed capture")
-        }.onFailure {
-            moduleLog("PreviewItemManager capture skipped: ${it.message}")
-        }
+        }.onFailure { moduleLog("PreviewItemManager capture skipped: ${it.message}") }
 
+        if (modern) {
+            installModernHooks(modernLoader!!, modernRecord!!)
+        } else {
+            installLegacyHooks(legacyManager!!, legacyRecord!!)
+        }
+    }
+
+    private fun installModernHooks(loaderClass: Class<*>, recordClass: Class<*>) {
+        // Confirmed in the supplied ColorOS 17 DEX:
+        // loadIcon(View, Launcher, boolean)
+        // getIconResultForAsync(Launcher, View, ItemInfo, LauncherBaseCardDrawable, RectF)
+        // getIcon(IconViewCallback, boolean)
+        // IconSurfaceRecord.onIconLoaded$default(Record, View, ..., Drawable, ..., int, int)
+        hookAllNamedMethods(loaderClass, "loadIcon", "surface-v17-load") { chain ->
+            val view = chain.args.firstOrNull() as? View
+            if (view != null) targetOverrides.remove(view)
+            chain.thisObject?.let(callbackTargets::remove)
+            chain.proceed()
+        }
+        hookAllNamedMethods(loaderClass, "getIconResultForAsync", "surface-v17-async") { chain ->
+            val args = chain.args.toTypedArray()
+            armTargetOverride(chain.thisObject, args, "async")
+            chain.proceed(args)
+        }
+        hookAllNamedMethods(loaderClass, "getIcon", "surface-v17-callback") { chain ->
+            val args = chain.args.toTypedArray()
+            wrapCallback(chain.thisObject, args, MODERN_CALLBACK_CLASS)
+            chain.proceed(args)
+        }
+        hookAllNamedMethods(loaderClass, "release", "surface-v17-release") { chain ->
+            chain.thisObject?.let(callbackTargets::remove)
+            chain.proceed()
+        }
+        // Final sink for both initial and redraw paths. In this Kotlin static
+        // default method the Drawable is argument 7 (including the Record receiver).
+        hookAllNamedMethods(recordClass, "onIconLoaded\$default", "surface-v17-final-sink") { chain ->
+            val args = chain.args.toTypedArray()
+            beforeModernIconSurfaceLoaded(args)
+            chain.proceed(args)
+        }
+        moduleLog("hooked ColorOS 17 IconDrawableLoader and IconSurfaceRecord")
+    }
+
+    private fun installLegacyHooks(managerClass: Class<*>, recordClass: Class<*>) {
         hookAllNamedMethods(managerClass, "fetchIcon", "surface-fetchIcon") { chain ->
             val args = chain.args.toTypedArray()
             armTargetOverride(chain.thisObject, args, "fetch")
             chain.proceed(args)
         }
-
-        hookAllNamedMethods(
-            managerClass,
-            "getIconResultForAsync",
-            "surface-async-result"
-        ) { chain ->
+        hookAllNamedMethods(managerClass, "getIconResultForAsync", "surface-async-result") { chain ->
             val args = chain.args.toTypedArray()
             armTargetOverride(chain.thisObject, args, "async")
             replaceDrawableArgumentFromItemInfo(args)
             chain.proceed(args)
         }
-
-        // The callback may be registered before the loader fills resultDrawable.
-        // This is the single sink used for both pre-load and return animations.
         hookAllNamedMethods(managerClass, "getIcon", "surface-v16-callback") { chain ->
             val args = chain.args.toTypedArray()
-            wrapV16Callback(chain.thisObject, args)
+            wrapCallback(chain.thisObject, args, LEGACY_CALLBACK_CLASS)
             chain.proceed(args)
         }
-
-        // Verified in the supplied launcher APK (versionName 16.6.20):
-        // IconViewManager#release() is a real declared method. Drop the
-        // short-lived per-manager callback target on release to avoid stale
-        // overrides being replayed on a reused IconViewManager.
         hookAllNamedMethods(managerClass, "release", "surface-v16-release") { chain ->
             chain.thisObject?.let(callbackTargets::remove)
             chain.proceed()
         }
-
-        moduleLog("hooked IconViewManager fetch/async/getIcon callback/release")
-
         hookAllNamedMethods(recordClass, "onIconLoaded", "surface-final-sink") { chain ->
             val args = chain.args.toTypedArray()
             beforeIconSurfaceLoaded(args)
             chain.proceed(args)
         }
-        moduleLog("hooked IconSurfaceRecord#onIconLoaded")
+        moduleLog("hooked legacy IconSurface manager and record")
     }
 
     private fun hookAllNamedMethods(
@@ -256,14 +293,11 @@ class OplusIconSurfaceGuard : XposedModule() {
         }
     }
 
-    private fun wrapV16Callback(owner: Any?, args: Array<Any?>) {
+    private fun wrapCallback(owner: Any?, args: Array<Any?>, callbackClassName: String) {
         if (owner == null || args.size < 2) return
         val callback = args[0] ?: return
         val callbackInterface = runCatching {
-            Class.forName(
-                "com.android.launcher3.anim.iconsurfacemanager.IconViewCallback",
-                false, owner.javaClass.classLoader
-            )
+            Class.forName(callbackClassName, false, owner.javaClass.classLoader)
         }.getOrNull() ?: return
         if (!callbackInterface.isInterface || !callbackInterface.isInstance(callback)) return
         val target = callbackTargets[owner]
@@ -329,6 +363,31 @@ class OplusIconSurfaceGuard : XposedModule() {
         if (!ThemedIconPolicy.shouldThemeAnimation(view, item)) return null
         val state = ThemedIconPolicy.themedStateFor(item) ?: return null
         return newDrawable(state, view.context)
+    }
+
+    private fun beforeModernIconSurfaceLoaded(args: Array<Any?>) {
+        // Verified descriptor in ColorOS 17: 15 parameters in the static
+        // onIconLoaded$default method, including the IconSurfaceRecord receiver.
+        if (args.size != 15) return
+        val record = args[0] ?: return
+        val view = args[1] as? View ?: return
+        val original = args[7] as? Drawable ?: return
+
+        // The loader's asynchronous callback may arrive after the record has
+        // reconstructed a full-color drawable. Prefer the captured, validated
+        // ItemInfo for folder return animations (view.tag is FolderInfo there).
+        val loader = invokeNoArg(record, "getIconDrawableLoader")
+        val target = loader?.let { callbackTargets[it] }
+        val replacement = if (target != null &&
+            target.view.get() === view &&
+            target.key == ThemedIconPolicy.itemKey(target.info) &&
+            ThemedIconPolicy.shouldThemeSurfaceTarget(view, target.info)) {
+            newDrawable(target.state, view.context)
+        } else {
+            replacementForView(view) ?: return
+        }
+        replacement.bounds = original.bounds
+        args[7] = replacement
     }
 
     private fun beforeIconSurfaceLoaded(args: Array<Any?>) {
