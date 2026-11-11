@@ -652,6 +652,7 @@ class ThemedIcons : XposedModule() {
 
         val size = 192
         val bitmap = createBitmap(size, size)
+        try {
         val canvas = Canvas(bitmap)
 
         val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bgColor }
@@ -696,10 +697,9 @@ class ThemedIcons : XposedModule() {
             }
         }
 
-        // circleMasked produces an independent output bitmap. The intermediate
-        // 192x192 ARGB bitmap must not remain allocated until a later GC cycle.
-        return try {
-            circleMasked(bitmap)
+        // Always release this temporary bitmap, even when the icon Drawable
+        // throws and the failure handler returns before applying the mask.
+        return circleMasked(bitmap)
         } finally {
             bitmap.recycle()
         }
