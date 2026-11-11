@@ -696,7 +696,13 @@ class ThemedIcons : XposedModule() {
             }
         }
 
-        return circleMasked(bitmap)
+        // circleMasked produces an independent output bitmap. The intermediate
+        // 192x192 ARGB bitmap must not remain allocated until a later GC cycle.
+        return try {
+            circleMasked(bitmap)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
 }
