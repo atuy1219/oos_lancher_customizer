@@ -47,7 +47,13 @@ internal class IconEnvironment(
         override fun onConfigurationChanged(newConfig: Configuration) { changed() }
         override fun onLowMemory() { trim() }
         override fun onTrimMemory(level: Int) {
-            if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) trim()
+            // UI_HIDDEN (20) is a normal visibility transition, not evidence of
+            // memory pressure. Clearing the icon cache here forces expensive
+            // redraws when the user returns to the home screen.
+            // Running-low levels (10/15) are no longer sent on modern Android;
+            // retain a bounded cache until the process actually enters the
+            // background LRU (40+) or the platform requests onLowMemory.
+            if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) trim()
         }
     }
     private val wallpaper = object : BroadcastReceiver() {
