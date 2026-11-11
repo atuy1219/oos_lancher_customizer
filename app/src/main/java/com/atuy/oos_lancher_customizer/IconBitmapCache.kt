@@ -26,6 +26,10 @@ internal class IconBitmapCache(maxBytes: Int = 16 * 1024 * 1024) {
                     return result
                 }
             }
+            // This cache's loader creates a fresh bitmap per miss. When the
+            // theme changes during rendering, the obsolete result is never
+            // shared with a view or inserted into the cache.
+            result?.recycle()
         }
         return null
     }
