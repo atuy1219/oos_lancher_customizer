@@ -31,9 +31,8 @@ jobs:
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
-          # ubuntu-latest already contains this version. Pin it instead of following the
-          # action's moving default, which can briefly point at a not-yet-published archive.
-          cmdline-tools-version: '12.0'
+          # Use the runner's current command-line tools. Revision 12.0's
+          # download archive now returns 404 on GitHub-hosted runners.
 
       - name: Install Android 17 SDK
         shell: bash
