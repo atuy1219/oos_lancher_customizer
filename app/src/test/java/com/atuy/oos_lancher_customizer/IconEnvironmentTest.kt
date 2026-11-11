@@ -33,7 +33,10 @@ class IconEnvironmentTest {
         assertEquals(1, refreshes)
         app.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE)
         assertEquals(0, trims)
+        // Leaving the home screen is routine and must not evict the icon cache.
         app.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN)
+        assertEquals(0, trims)
+        app.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
         assertEquals(1, trims)
         app.onLowMemory()
         assertEquals(2, trims)
