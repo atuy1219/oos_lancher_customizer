@@ -289,11 +289,13 @@ class ThemedIcons : XposedModule() {
 
         val context = view.context.applicationContext ?: view.context
         prepare(context)
-        val originalBinding = binding(folders, view, info, source)
+        // getDrawableByIndex can run on every frame: a drawable already themed
+        // for this eligible view needs no Binding lookup or stable item key.
         if (ThemedIconPolicy.isThemedDrawable(source)) {
             ThemedIconPolicy.rememberDrawable(source, info)
             return source
         }
+        val originalBinding = binding(folders, view, info, source)
         val key = ThemedIconPolicy.itemKey(info)
         val cached = bigFolderViewCache[view]
         val reused = cached?.themed?.get()
