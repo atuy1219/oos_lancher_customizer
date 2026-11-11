@@ -29,15 +29,27 @@ internal object Pixel17MonochromeRenderer {
         try {
             val extra = AdaptiveIconDrawable.getExtraInsetFraction()
             val native = (icon as? AdaptiveIconDrawable)?.monochrome
-            val layer = native ?: generate(icon, size, resources, extra)
-            val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8)
-            // MonoIconThemeController#createThemedBitmap uses this exact negative
-            // inset for BOTH native monochrome and generated alpha drawables.
-            val inset = InsetDrawable(layer, -extra)
-            inset.setBounds(0, 0, size, size)
-            inset.draw(Canvas(bitmap))
-            if (matchThemeBackground && native == null) alignGeneratedBackground(bitmap)
-            return bitmap
+            // Generated monochrome is a temporary ALPHA_8 bitmap, not a cache entry.
+            // Never recycle the app-owned native monochrome Drawable.
+            val generated = if (native == null) generate(icon, size, resources, extra) else null
+            try {
+                val layer = native ?: generated ?: error("Missing monochrome layer")
+                val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8)
+                // MonoIconThemeController#createThemedBitmap uses this exact negative
+                // inset for BOTH native monochrome and generated alpha drawables.
+                val inset = InsetDrawable(layer, -extra)
+                inset.setBounds(0, 0, size, size)
+                try {
+                    inset.draw(Canvas(bitmap))
+                    if (matchThemeBackground && native == null) alignGeneratedBackground(bitmap)
+                    return bitmap
+                } catch (error: Throwable) {
+                    bitmap.recycle()
+                    throw error
+                }
+            } finally {
+                (generated as? BitmapDrawable)?.bitmap?.recycle()
+            }
         } finally {
             icon.bounds = oldBounds
         }
